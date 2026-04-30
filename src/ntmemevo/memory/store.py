@@ -64,5 +64,30 @@ class CandidateMemoryStore:
             handle.write(json.dumps(memory.to_json(), ensure_ascii=False) + "\n")
         return memory
 
+    def import_jsonl(self, path: str | Path, append_to_store_file: bool = True) -> list[CandidateMemory]:
+        source_path = Path(path)
+        imported: list[CandidateMemory] = []
+        if not source_path.exists():
+            raise FileNotFoundError(f"Candidate memory bootstrap file not found: {source_path}")
+
+        existing_ids = {memory.memory_id for memory in self.memories}
+        with source_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                memory = CandidateMemory.from_json(json.loads(line))
+                if memory.memory_id in existing_ids:
+                    raise ValueError(f"Duplicate candidate memory id: {memory.memory_id}")
+                existing_ids.add(memory.memory_id)
+                imported.append(memory)
+
+        self.memories.extend(imported)
+        if append_to_store_file and imported:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                for memory in imported:
+                    handle.write(json.dumps(memory.to_json(), ensure_ascii=False) + "\n")
+        return imported
+
     def all(self) -> list[CandidateMemory]:
         return list(self.memories)

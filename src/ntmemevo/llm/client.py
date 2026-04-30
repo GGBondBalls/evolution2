@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -25,8 +26,9 @@ class LLMClient(ABC):
 class MockLLMClient(LLMClient):
     """Deterministic tool-use model for offline smoke tests."""
 
-    def __init__(self, model: str = "mock-tool-agent") -> None:
+    def __init__(self, model: str = "mock-tool-agent", follow_memory_hints: bool = False) -> None:
         self.model = model
+        self.follow_memory_hints = follow_memory_hints
 
     def complete(
         self,
@@ -64,6 +66,11 @@ class MockLLMClient(LLMClient):
         instruction_match = re.search(r"^instruction:\s*(.+)$", prompt, flags=re.IGNORECASE | re.MULTILINE)
         task_text = instruction_match.group(1) if instruction_match else prompt
         lower_task = task_text.lower()
+
+        if self.follow_memory_hints:
+            memory_decision = self._decide_from_retrieved_memory(prompt)
+            if memory_decision:
+                return memory_decision
 
         if "ord-1001" in lower_task:
             return {
@@ -105,6 +112,37 @@ class MockLLMClient(LLMClient):
             "thought": "No matching tool-use pattern was found.",
             "action": "final",
             "answer": "Unable to determine the answer from the available tools.",
+        }
+
+    def _decide_from_retrieved_memory(self, prompt: str) -> dict[str, Any] | None:
+        block_match = re.search(
+            r"retrieved memories:\s*(.*?)\navailable tools:",
+            prompt,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not block_match:
+            return None
+        memory_block = block_match.group(1)
+        tool_match = re.search(
+            r"\b(get_order_status|check_inventory|check_exchange_eligibility|lookup_policy)"
+            r"\((\{.*?\})\)",
+            memory_block,
+            flags=re.DOTALL,
+        )
+        if not tool_match:
+            return None
+        tool_name = tool_match.group(1)
+        try:
+            args = ast.literal_eval(tool_match.group(2))
+        except (SyntaxError, ValueError):
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        return {
+            "thought": "Following the highest-ranked retrieved memory tool hint.",
+            "action": "tool",
+            "tool_name": tool_name,
+            "args": args,
         }
 
 
@@ -157,7 +195,10 @@ def create_llm_client(config: dict[str, Any]) -> LLMClient:
     provider = str(config.get("provider", "mock")).lower()
     model = str(config.get("model", "mock-tool-agent"))
     if provider == "mock":
-        return MockLLMClient(model=model)
+        return MockLLMClient(
+            model=model,
+            follow_memory_hints=bool(config.get("follow_memory_hints", False)),
+        )
     if provider == "openai":
         return OpenAIChatClient(model=model)
     raise ValueError(f"Unsupported LLM provider: {provider}")

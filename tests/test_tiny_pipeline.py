@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ntmemevo.experiments.run_stream import run
 from ntmemevo.memory.extractor import CandidateExtractionContext, CandidateMemoryExtractor
+from ntmemevo.memory.gate import RetrieverGate, RetrieverGateConfig
 from ntmemevo.memory.schema import CandidateMemory, candidate_memory_json_schema
 from ntmemevo.types import AgentResult, Task
 
@@ -278,3 +279,303 @@ logging:
     assert all(record["used_memory_ids"] == [] for record in run_records)
     assert all(record["event_type"] == "candidate_extract" for record in update_records)
     assert all(record["candidate_status"] == "candidate" for record in update_records)
+
+
+def test_retriever_gate_accepts_scoped_candidate_and_rejects_negative_evidence() -> None:
+    task = Task(
+        task_id="tiny_refund_gate_001",
+        instruction="Decide whether order ORD-1002 can be refunded.",
+        expected_answer_contains=("not refundable",),
+    )
+    success_result = AgentResult(
+        task_id=task.task_id,
+        success=True,
+        reward=1.0,
+        final_answer="Order ORD-1002 is cancelled and not refundable.",
+        num_steps=2,
+        prompt_tokens=10,
+        completion_tokens=4,
+        tool_calls=1,
+        trace_summary=("get_order_status({'order_id': 'ORD-1002'}) -> Order ORD-1002 is cancelled and not refundable.",),
+    )
+    failed_result = AgentResult(
+        task_id=task.task_id,
+        success=False,
+        reward=0.0,
+        final_answer="Delivered retail orders can be returned within 30 days.",
+        num_steps=2,
+        prompt_tokens=10,
+        completion_tokens=4,
+        tool_calls=1,
+        trace_summary=("lookup_policy({'policy_name': 'return_window'}) -> Delivered retail orders can be returned within 30 days.",),
+        error_type="expected_answer_mismatch",
+    )
+    extractor = CandidateMemoryExtractor()
+    positive = extractor.extract(
+        task=task,
+        result=success_result,
+        context=CandidateExtractionContext(
+            benchmark="tiny_tools",
+            experiment_id="gate_unit",
+            run_id="gate_unit_success",
+            iteration=1,
+        ),
+    )
+    negative = extractor.extract(
+        task=task,
+        result=failed_result,
+        context=CandidateExtractionContext(
+            benchmark="tiny_tools",
+            experiment_id="gate_unit",
+            run_id="gate_unit_failed",
+            iteration=2,
+        ),
+    )
+
+    selected, decisions = RetrieverGate(
+        memories=[negative, positive],
+        config=RetrieverGateConfig(top_k=2),
+    ).retrieve(task=task, iteration=3)
+
+    accepted_ids = {memory.memory_id for memory in selected}
+    negative_decision = next(decision for decision in decisions if decision.memory_id == negative.memory_id)
+    positive_decision = next(decision for decision in decisions if decision.memory_id == positive.memory_id)
+
+    assert positive.memory_id in accepted_ids
+    assert positive_decision.gate_decision == "accept"
+    assert negative_decision.gate_decision == "reject"
+    assert negative_decision.rejection_reason == "negative_evidence_present"
+
+
+def test_nt_memevo_gate_retrieves_structured_candidates(tmp_path: Path) -> None:
+    split_file = tmp_path / "repeated_tasks.json"
+    split_file.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "tiny_order_repeat_001",
+                    "instruction": "Find the delivery status for order ORD-1001.",
+                    "expected_answer_contains": ["delivered"],
+                    "initial_state": {},
+                },
+                {
+                    "task_id": "tiny_order_repeat_002",
+                    "instruction": "Find the delivery status for order ORD-1001.",
+                    "expected_answer_contains": ["delivered"],
+                    "initial_state": {},
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config_nt_gate.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate"
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 2
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 1
+models:
+  actor:
+    provider: mock
+    model: mock-tool-agent
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 1
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    reject_negative_evidence: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 2
+    assert metrics["success_rate"] == 1.0
+    assert metrics["memory_policy"] == "nt_memevo_gate"
+    assert metrics["memory_size"] == 2
+    assert metrics["memory_top_k"] == 1
+    assert metrics["gate_accepted_count"] >= 1
+
+    run_records = [
+        json.loads(line)
+        for line in (output_dir / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+    assert run_records[0]["used_memory_ids"] == []
+    assert run_records[1]["used_memory_ids"]
+    assert any(record.get("event_type") == "gate_decision" for record in update_records)
+    assert any(record.get("gate_decision") == "accept" for record in update_records)
+
+
+def test_nt_memevo_gate_rejects_polluted_bootstrap_memory(tmp_path: Path) -> None:
+    config_path = tmp_path / "config_nt_gate_polluted.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate_polluted"
+    split_file = Path("data/task_splits/tiny_tool_tasks.json").resolve()
+    bootstrap_file = Path("data/memory_fixtures/tiny_polluted_candidates.jsonl").resolve()
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_polluted_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 2
+models:
+  actor:
+    provider: mock
+    model: mock-memory-sensitive-agent
+    follow_memory_hints: true
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 2
+  bootstrap_file: {bootstrap_file.as_posix()}
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    reject_negative_evidence: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == 1.0
+    assert metrics["negative_transfer_rate"] == 0.0
+    assert metrics["gate_rejected_count"] >= 1
+    assert metrics["gate_rejection_reasons"]["negative_evidence_present"] >= 1
+
+    run_records = [
+        json.loads(line)
+        for line in (output_dir / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+    assert all("polluted_refund_lookup_policy_001" not in record["used_memory_ids"] for record in run_records)
+    assert any(record.get("event_type") == "bootstrap_candidate" for record in update_records)
+    assert any(
+        record.get("memory_id") == "polluted_refund_lookup_policy_001"
+        and record.get("rejection_reason") == "negative_evidence_present"
+        for record in update_records
+    )
+
+
+def test_unsafe_polluted_gate_triggers_negative_transfer_metric(tmp_path: Path) -> None:
+    split_file = tmp_path / "refund_task.json"
+    split_file.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "tiny_refund_polluted_001",
+                    "instruction": "Decide whether order ORD-1002 can be refunded.",
+                    "expected_answer_contains": ["not refundable"],
+                    "initial_state": {},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config_nt_gate_unsafe_polluted.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate_unsafe_polluted"
+    bootstrap_file = Path("data/memory_fixtures/tiny_polluted_candidates.jsonl").resolve()
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_unsafe_polluted_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 1
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 1
+models:
+  actor:
+    provider: mock
+    model: mock-memory-sensitive-agent
+    follow_memory_hints: true
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 1
+  bootstrap_file: {bootstrap_file.as_posix()}
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  gate:
+    min_score: -1.0
+    min_similarity: 0.0
+    min_precondition: 0.0
+    max_risk: 1.0
+    reject_negative_evidence: false
+    allowed_statuses: ["candidate", "active", "quarantined"]
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 1
+    assert metrics["success_rate"] == 0.0
+    assert metrics["with_memory_fail_no_memory_success"] == 1
+    assert metrics["negative_transfer_rate"] == 1.0
+    assert metrics["harmful_memory_ids"] == ["polluted_refund_lookup_policy_001"]

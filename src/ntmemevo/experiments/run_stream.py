@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import argparse
 import random
+from collections import Counter
+from pathlib import Path
 from typing import Any
 
 from ntmemevo.agents.react_agent import ReActToolAgent
 from ntmemevo.config import load_config
 from ntmemevo.envs.factory import create_env
-from ntmemevo.evaluation.metrics import aggregate_results
+from ntmemevo.evaluation.metrics import aggregate_negative_transfer, aggregate_results
 from ntmemevo.llm.client import create_llm_client
 from ntmemevo.logging.run_logger import RunLogger
 from ntmemevo.logging.trace_logger import TraceLogger
 from ntmemevo.memory.extractor import CandidateMemoryExtractor
+from ntmemevo.memory.gate import GateDecision, RetrieverGate, RetrieverGateConfig
 from ntmemevo.memory.raw_trace_store import RawTraceMemoryStore
 from ntmemevo.memory.reflection_memory import ReflectionExtractor, ReflectionMemoryStore
 from ntmemevo.memory.retriever import LexicalMemoryRetriever
@@ -45,7 +48,9 @@ def run(config_path: str) -> dict[str, Any]:
     memory_policy = str(memory_config.get("method", "none")).lower()
     memory_top_k = int(memory_config.get("top_k", config.agent.get("memory_top_k", 0)))
     memory_store = None
+    gate_config: RetrieverGateConfig | None = None
     retrieval_enabled = False
+    gate_decisions: list[GateDecision] = []
     if memory_policy == "raw_trace_rag":
         memory_store = RawTraceMemoryStore(
             path=config.output_dir / "memories.jsonl",
@@ -63,7 +68,7 @@ def run(config_path: str) -> dict[str, Any]:
             extractor=extractor,
         )
         retrieval_enabled = True
-    elif memory_policy == "nt_memevo_candidate":
+    elif memory_policy in {"nt_memevo_candidate", "nt_memevo_gate"}:
         extractor = CandidateMemoryExtractor(
             extractor_model=str(
                 memory_config.get("extractor_model", "deterministic_candidate_extractor_v1")
@@ -80,6 +85,28 @@ def run(config_path: str) -> dict[str, Any]:
             save_failures=bool(memory_config.get("save_failures", True)),
             extractor=extractor,
         )
+        if memory_policy == "nt_memevo_gate":
+            retrieval_enabled = True
+            gate_config = RetrieverGateConfig.from_config(memory_config, top_k=memory_top_k)
+        bootstrap_file = memory_config.get("bootstrap_file")
+        if bootstrap_file:
+            bootstrap_path = Path(str(bootstrap_file))
+            imported = memory_store.import_jsonl(bootstrap_path, append_to_store_file=True)
+            for memory in imported:
+                run_logger.append_jsonl(
+                    "memory_updates.jsonl",
+                    {
+                        "event_type": "bootstrap_candidate",
+                        "iteration": 0,
+                        "task_id": None,
+                        "memory_policy": memory_policy,
+                        "memory_id": memory.memory_id,
+                        "candidate_type": memory.type,
+                        "candidate_status": memory.lifecycle.status,
+                        "positive_evidence": list(memory.positive_evidence),
+                        "negative_evidence": list(memory.negative_evidence),
+                    },
+                )
     elif memory_policy not in {"none", "null"}:
         raise ValueError(f"Unsupported memory method: {memory_policy}")
     effective_memory_top_k = memory_top_k if retrieval_enabled else 0
@@ -91,10 +118,33 @@ def run(config_path: str) -> dict[str, Any]:
 
         memories = []
         if memory_store is not None and retrieval_enabled:
-            memories = LexicalMemoryRetriever(memory_store.all()).retrieve(
-                query=task.instruction,
-                top_k=effective_memory_top_k,
-            )
+            if memory_policy == "nt_memevo_gate":
+                if gate_config is None:
+                    raise RuntimeError("nt_memevo_gate requires a RetrieverGateConfig")
+                memories, current_gate_decisions = RetrieverGate(
+                    memories=memory_store.all(),
+                    config=gate_config,
+                ).retrieve(
+                    task=task,
+                    iteration=index,
+                    top_k=effective_memory_top_k,
+                )
+                gate_decisions.extend(current_gate_decisions)
+                for decision in current_gate_decisions:
+                    record = decision.to_json()
+                    record.update(
+                        {
+                            "event_type": "gate_decision",
+                            "iteration": index,
+                            "memory_policy": memory_policy,
+                        }
+                    )
+                    run_logger.append_jsonl("memory_updates.jsonl", record)
+            else:
+                memories = LexicalMemoryRetriever(memory_store.all()).retrieve(
+                    query=task.instruction,
+                    top_k=effective_memory_top_k,
+                )
             run_logger.append_jsonl(
                 "memory_updates.jsonl",
                 {
@@ -105,6 +155,9 @@ def run(config_path: str) -> dict[str, Any]:
                     "retrieved_memory_ids": [memory.memory_id for memory in memories],
                     "retrieved_scores": [memory.score for memory in memories],
                     "retrieved_memory_kinds": [memory.metadata.get("memory_kind") for memory in memories],
+                    "retrieved_candidate_types": [
+                        memory.metadata.get("candidate_type") for memory in memories
+                    ],
                 },
             )
 
@@ -118,7 +171,7 @@ def run(config_path: str) -> dict[str, Any]:
         )
 
         if memory_store is not None:
-            if memory_policy == "nt_memevo_candidate":
+            if memory_policy in {"nt_memevo_candidate", "nt_memevo_gate"}:
                 memory = memory_store.add_from_result(
                     task=task,
                     result=result,
@@ -127,7 +180,11 @@ def run(config_path: str) -> dict[str, Any]:
                 )
             else:
                 memory = memory_store.add_from_result(task=task, result=result, iteration=index)
-            event_type = "candidate_extract" if memory_policy == "nt_memevo_candidate" else "add"
+            event_type = (
+                "candidate_extract"
+                if memory_policy in {"nt_memevo_candidate", "nt_memevo_gate"}
+                else "add"
+            )
             run_logger.append_jsonl(
                 "memory_updates.jsonl",
                 {
@@ -156,9 +213,31 @@ def run(config_path: str) -> dict[str, Any]:
             )
 
     metrics = aggregate_results(results)
+    no_memory_success_by_task = {
+        task.task_id: bool(task.metadata.get("no_memory_success", True))
+        for task in tasks
+    }
+    metrics.update(
+        aggregate_negative_transfer(
+            results=results,
+            no_memory_success_by_task=no_memory_success_by_task,
+        )
+    )
     metrics["memory_policy"] = memory_policy
     metrics["memory_size"] = len(memory_store.all()) if memory_store is not None else 0
     metrics["memory_top_k"] = effective_memory_top_k
+    gate_reason_counts = Counter(
+        decision.rejection_reason or "accepted"
+        for decision in gate_decisions
+    )
+    metrics["gate_decision_count"] = len(gate_decisions)
+    metrics["gate_accepted_count"] = sum(
+        1 for decision in gate_decisions if decision.gate_decision == "accept"
+    )
+    metrics["gate_rejected_count"] = sum(
+        1 for decision in gate_decisions if decision.gate_decision == "reject"
+    )
+    metrics["gate_rejection_reasons"] = dict(sorted(gate_reason_counts.items()))
     run_logger.write_metrics(metrics)
     return metrics
 

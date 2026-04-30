@@ -1,0 +1,8 @@
+[
+  {
+    "task_id": "tiny_refund_polluted_001",
+    "instruction": "Decide whether order ORD-1002 can be refunded.",
+    "expected_answer_contains": ["not refundable"],
+    "initial_state": {}
+  }
+]

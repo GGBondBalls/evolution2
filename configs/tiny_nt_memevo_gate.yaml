@@ -1,0 +1,43 @@
+experiment:
+  name: tiny_nt_memevo_gate_seed1
+  seed: 1
+  output_dir: runs/tiny_nt_memevo_gate_seed1
+
+benchmark:
+  name: tiny_tools
+  split_file: data/task_splits/tiny_tool_tasks.json
+  max_tasks: 5
+
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 2
+
+models:
+  actor:
+    provider: mock
+    model: mock-tool-agent
+    temperature: 0.0
+    max_tokens: 512
+
+memory:
+  method: nt_memevo_gate
+  top_k: 2
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  max_claim_chars: 700
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    max_risk: 0.65
+    reject_negative_evidence: true
+    allowed_statuses: ["candidate", "active"]
+
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true

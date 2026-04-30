@@ -258,49 +258,254 @@ cat runs/tiny_nt_memevo_candidate_seed1/metrics.json
 1. 5 条事件均为 `event_type=candidate_extract`。
 2. 5 条 candidate memory id 分别为 `cand_000001_tiny_order_status_001` 到 `cand_000005_tiny_policy_001`。
 3. candidate 类型覆盖 `tool_usage`、`constraint` 和 `user_policy`。
-4. 5 条记录均为 `candidate_status=candidate`，`positive_evidence` 均指向对应 run id，`negative_evidence=[]`。
 
-`candidate_memories.jsonl` 抽查结果：
+## tiny_nt_memevo_gate_seed1
 
-1. 前两条 memory 均包含完整结构化字段：`memory_id`、`type`、`claim`、`scope`、`action_hint`、`avoid_hint`、`positive_evidence`、`negative_evidence`、`utility`、`lifecycle`、`source` 和 `text`。
-2. `utility` 默认值符合设计：`alpha=1.0`，`beta=1.0`，`mean_delta_reward=0.0`，`lcb_delta_reward=0.0`，`num_used=0`，`num_helpful=0`，`num_harmful=0`。
-3. `lifecycle` 默认值符合设计：`status=candidate`，`last_used_iter=null`，`ttl=50`。
-4. `source.created_from` 与 `positive_evidence` 对齐，`source.extractor_model=deterministic_candidate_extractor_v1`，`prompt_hash` 已生成。
+### 实验名称
 
-### 验收标准
+`tiny_nt_memevo_gate_seed1`
 
-1. `pytest` 全部通过。
-2. 新增 candidate memory schema 校验测试，覆盖必填字段、默认 utility、lifecycle 和 source 元信息。
-3. `tiny_nt_memevo_candidate_seed1` 能生成标准日志目录，并写出结构化 candidate memory JSONL。
-4. `memory_updates.jsonl` 能记录 candidate extraction 事件、来源 run、任务结果和 candidate memory id。
-5. 现有 `tiny_nomem`、`tiny_raw_trace_rag`、`tiny_reflexion` 三组配置不回归。
-6. 本轮只要求 candidate pool 稳定写入，不要求实现 verification gate、utility learning 或 quarantine。
+### 日期与环境
+
+2026-04-30，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+### 运行命令
+
+```bash
+conda activate rm
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate.yaml
+cat runs/tiny_nt_memevo_gate_seed1/metrics.json
+tail -n 20 runs/tiny_nt_memevo_gate_seed1/memory_updates.jsonl
+tail -n 5 runs/tiny_nt_memevo_gate_seed1/runs.jsonl
+```
+
+### 配置文件
+
+`configs/tiny_nt_memevo_gate.yaml`
+
+关键参数：`benchmark.name=tiny_tools`，`max_tasks=5`，`memory.method=nt_memevo_gate`，`memory.top_k=2`，`gate.reject_negative_evidence=true`，`gate.allowed_statuses=["candidate","active"]`，`models.actor.provider=mock`。
+
+### 输出目录
+
+`runs/tiny_nt_memevo_gate_seed1/`
+
+### 结果
+
+`pytest` 结果：
+
+```text
+9 passed in 0.05s
+```
+
+`tiny_nt_memevo_gate_seed1/metrics.json`：
+
+```json
+{
+  "num_tasks": 5,
+  "success_rate": 1.0,
+  "avg_reward": 1.0,
+  "avg_steps": 2.0,
+  "avg_prompt_tokens": 310.4,
+  "avg_completion_tokens": 74.2,
+  "avg_tool_calls": 1.0,
+  "with_memory_fail_no_memory_success": 0,
+  "memory_attributed_failures": 0,
+  "negative_transfer_rate": 0.0,
+  "harmful_memory_ids": [],
+  "negative_transfer_failure_examples": [],
+  "memory_policy": "nt_memevo_gate",
+  "memory_size": 5,
+  "memory_top_k": 2,
+  "gate_decision_count": 10,
+  "gate_accepted_count": 0,
+  "gate_rejected_count": 10,
+  "gate_rejection_reasons": {
+    "precondition_below_threshold": 10
+  }
+}
+```
+
+`memory_updates.jsonl` 抽查结果：
+
+1. 第 1 个任务无历史 candidate，`retrieve` 事件为空检索。
+2. 第 2 至第 5 个任务共写入 10 条 `gate_decision` 事件。
+3. 10 条 `gate_decision` 均为 `gate_decision=reject`，`rejection_reason=precondition_below_threshold`。
+4. 每个任务结束后均写入 1 条 `candidate_extract`，共生成 5 条 candidate memory。
+
+`runs.jsonl` 抽查结果：
+
+1. 5 个任务均 `success=true`、`reward=1.0`。
+2. 5 个任务均 `used_memory_ids=[]`，说明本配置下 gate 未注入跨 intent candidate memory。
+3. 工具调用路径符合预期：order status、inventory、refund、exchange、policy 分别调用对应工具。
 
 ### 现象与问题
 
-第四轮复验通过。`nt_memevo_candidate` 能稳定生成 5 条结构化 candidate memory，且不会注入当前 agent prompt；因此 `used_memory_ids=[]`，`avg_prompt_tokens=310.4`，与 no-memory 一致。这符合第四轮边界：只验证 candidate pool 写入，不验证记忆检索收益。
+本实验通过。主 tiny 五任务 intent 基本不同，保守 gate 全部拒绝跨 intent candidate memory，因此 `avg_prompt_tokens=310.4` 与 no-memory 一致，且 `negative_transfer_rate=0.0`。
 
-当前 tiny benchmark 仍然过简单，四组配置成功率均为 1.0，无法衡量记忆是否提升任务能力，也无法触发 negative transfer。Raw Trace RAG 和 Reflexion 的主要差异仍体现在 prompt token 成本：`none = nt_memevo_candidate < raw_trace_rag < reflexion`。
-
-本次用户粘贴的 `metrics.json` 末尾少了右花括号，但工作区实际 `runs/tiny_nt_memevo_candidate_seed1/metrics.json` 是完整 JSON，不是日志写入问题。
+该结果说明第五轮 gate 决策日志链路已跑通，但主 tiny 五任务无法验证 accepted path；accepted path 目前由测试里的 repeated-task pipeline 覆盖。
 
 ### 下一步
 
-第四轮完成。下一轮应进入 `RetrieverGate + tiny 污染记忆 fixture`，目标是把“结构化记忆能被写入”推进到“结构化记忆能被风险感知地选择，并能在离线 tiny 环境中稳定触发和记录 negative transfer”。
+下一轮应加入 repeated-intent tiny split，并实现 online utility update，使 gate 在安全同 intent 场景中能接受记忆、注入记忆并更新 utility。
+
+## tiny_nt_memevo_gate_polluted_seed1
+
+### 实验名称
+
+`tiny_nt_memevo_gate_polluted_seed1`
+
+### 日期与环境
+
+2026-04-30，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+### 运行命令
+
+```bash
+conda activate rm
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_polluted.yaml
+cat runs/tiny_nt_memevo_gate_polluted_seed1/metrics.json
+head -n 3 runs/tiny_nt_memevo_gate_polluted_seed1/candidate_memories.jsonl
+grep 'polluted_refund_lookup_policy_001' runs/tiny_nt_memevo_gate_polluted_seed1/memory_updates.jsonl
+tail -n 20 runs/tiny_nt_memevo_gate_polluted_seed1/memory_updates.jsonl
+```
+
+### 配置文件
+
+`configs/tiny_nt_memevo_gate_polluted.yaml`
+
+关键参数：`memory.method=nt_memevo_gate`，`memory.bootstrap_file=data/memory_fixtures/tiny_polluted_candidates.jsonl`，`gate.reject_negative_evidence=true`，`models.actor.follow_memory_hints=true`。
+
+### 输出目录
+
+`runs/tiny_nt_memevo_gate_polluted_seed1/`
+
+### 结果
+
+`pytest` 结果：
+
+```text
+9 passed in 0.05s
+```
+
+`tiny_nt_memevo_gate_polluted_seed1/metrics.json`：
+
+```json
+{
+  "num_tasks": 5,
+  "success_rate": 1.0,
+  "avg_reward": 1.0,
+  "avg_steps": 2.0,
+  "avg_prompt_tokens": 310.4,
+  "avg_completion_tokens": 74.2,
+  "avg_tool_calls": 1.0,
+  "with_memory_fail_no_memory_success": 0,
+  "memory_attributed_failures": 0,
+  "negative_transfer_rate": 0.0,
+  "harmful_memory_ids": [],
+  "negative_transfer_failure_examples": [],
+  "memory_policy": "nt_memevo_gate",
+  "memory_size": 6,
+  "memory_top_k": 2,
+  "gate_decision_count": 15,
+  "gate_accepted_count": 0,
+  "gate_rejected_count": 15,
+  "gate_rejection_reasons": {
+    "negative_evidence_present": 5,
+    "precondition_below_threshold": 10
+  }
+}
+```
+
+`candidate_memories.jsonl` 抽查结果：
+
+1. 第一条为 bootstrap 污染记忆 `polluted_refund_lookup_policy_001`。
+2. 该污染记忆 `type=warning`，`scope.intent=refund_eligibility`，`tool_names=["lookup_policy"]`。
+3. 该污染记忆包含 `negative_evidence=["polluted_bad_run_refund_001"]`。
+4. 该污染记忆的人工 utility 表示有害先验：`alpha=1.0`、`beta=3.0`、`mean_delta_reward=-1.0`、`lcb_delta_reward=-1.0`、`num_used=2`、`num_harmful=2`。
+5. 后续 5 条为本轮在线抽取的 candidate memory，总 memory size 为 6。
+
+`memory_updates.jsonl` 抽查结果：
+
+1. 第 0 轮写入 `event_type=bootstrap_candidate`，说明污染记忆已导入本轮 candidate pool。
+2. 污染记忆 `polluted_refund_lookup_policy_001` 在 5 个任务上均产生 `gate_decision=reject`。
+3. 污染记忆 5 次拒绝原因均为 `negative_evidence_present`。
+4. 其他 10 条候选记忆决策因 `precondition_below_threshold` 被拒绝。
+5. 5 次 `retrieve` 事件均为空检索，污染记忆未进入 prompt。
+
+### 现象与问题
+
+污染记忆拒绝实验通过。虽然污染记忆在 `tiny_refund_001` 上有较高 `precondition_score=0.9`，但由于带有 `negative_evidence` 且配置 `reject_negative_evidence=true`，gate 仍将其拒绝。因此本实验 `success_rate=1.0`、`negative_transfer_rate=0.0`，证明第五轮的污染记忆阻断链路有效。
+
+当前污染实验只验证“污染被拒绝”。为了验证“污染若被接受会造成失败”，仍需运行 `tiny_nt_memevo_gate_unsafe_polluted.yaml` 对照配置。
+
+### 下一步
+
+运行 unsafe polluted ablation，确认放宽 gate 后污染记忆会进入 `used_memory_ids` 并触发 `with_memory_fail_no_memory_success`。
+
+## tiny_nt_memevo_gate_unsafe_polluted_seed1
+
+### 实验名称
+
+`tiny_nt_memevo_gate_unsafe_polluted_seed1`
+
+### 日期与环境
+
+待运行。建议记录 Linux 发行版 / 机器标识、conda 环境 `rm`、Python 版本、pytest 版本。
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_unsafe_polluted.yaml
+cat runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/metrics.json
+cat runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/runs.jsonl
+cat runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/memory_updates.jsonl
+```
+
+### 配置文件
+
+`configs/tiny_nt_memevo_gate_unsafe_polluted.yaml`
+
+关键参数：`benchmark.split_file=data/task_splits/tiny_refund_only_tasks.json`，`memory.bootstrap_file=data/memory_fixtures/tiny_polluted_candidates.jsonl`，`gate.reject_negative_evidence=false`，`gate.min_score=-1.0`，`gate.max_risk=1.0`，`models.actor.follow_memory_hints=true`。
+
+### 输出目录
+
+`runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/`
+
+### 结果
+
+待运行。重点记录：
+
+1. `with_memory_fail_no_memory_success`。
+2. `negative_transfer_rate`。
+3. `harmful_memory_ids` 是否包含 `polluted_refund_lookup_policy_001`。
+4. `runs.jsonl` 中 `used_memory_ids` 和失败 `error_type`。
+
+### 现象与问题
+
+待运行。当前预期：unsafe gate 会接受污染记忆，mock agent 跟随错误工具提示，导致 refund-only 任务失败，用于证明负迁移指标链路可稳定触发。
+
+### 下一步
+
+该实验是有意放宽 gate 的反例配置，不应作为方法主结果；只用于对照 gated polluted 配置。
 
 ## 当前下一轮方向
 
-第一阶段第五轮建议优先实现 `RetrieverGate + tiny 污染记忆 fixture`。第四轮已将 candidate memory schema、store、extractor 和日志路径落成，下一步应开始让记忆“可选择、可伤害、可度量”，否则 negative transfer 仍无法在离线 tiny 环境中复现。
+第一阶段第六轮建议优先实现 `online utility update + repeated-intent tiny split`。第五轮已经跑通 gate 决策、污染记忆导入、污染拒绝和负迁移指标占位，但主 tiny 五任务中没有自然 accepted path，导致 `gate_accepted_count=0`，还不能验证“被接受记忆如何更新 utility 和 lifecycle”。
 
-第五轮建议范围：
+第六轮建议范围：
 
-1. 新增风险感知 `RetrieverGate`，初版用线性分数整合 lexical similarity、precondition match、utility、risk、age 和 context cost。
-2. 新增 active memory 或 gated candidate retrieval 的最小路径，使结构化 memory 可以被转换为 `RetrievedMemory` 并注入 prompt，但必须记录 gate 决策。
-3. 新增 tiny pollution fixture，手工注入与当前任务高相似但错误的 candidate / active memory，例如把 refund/order/exchange 的 action hint 故意绑定到错误工具或错误结论。
-4. 在 `memory_updates.jsonl` 中记录每条候选记忆的 `similarity_score`、`precondition_score`、`utility_score`、`risk_score`、`final_gate_score`、`gate_decision` 和 `rejection_reason`。
-5. 新增 negative transfer 指标占位：`with_memory_fail_no_memory_success`、`harmful_memory_ids`、`memory_attributed_failures` 和 `negative_transfer_rate`。
-6. 保持 `none / raw_trace_rag / reflexion / nt_memevo_candidate` 四组配置继续可运行，并新增一组污染实验配置，例如 `tiny_nt_memevo_gate_polluted.yaml`。
-7. 第五轮仍不建议直接接 tau-bench；应先在 tiny 中让污染记忆和 gate 日志可复现，再接真实 benchmark。
+1. 新增 repeated-intent tiny split，例如连续两个 `order_status` 或 `refund_eligibility` 任务，使安全 candidate memory 能被 gate 接受并注入 prompt。
+2. 实现 candidate memory 的 online utility update：更新 `num_used`、`num_helpful`、`num_harmful`、`alpha`、`beta`、`mean_delta_reward`、`lcb_delta_reward` 和 `last_used_iter`。
+3. 在 `memory_updates.jsonl` 中新增 `utility_update` 事件，记录更新前后 utility、任务结果、memory id 和 helpful/harmful 判断。
+4. 实现最小 lifecycle 迁移：helpful candidate 可进入或保持 `active`，harmful 或带 negative evidence 的 memory 可进入 `quarantined`。
+5. 运行并记录 `tiny_nt_memevo_gate_unsafe_polluted.yaml`，确认 unsafe gate 接受污染记忆后 `negative_transfer_rate=1.0`，作为 polluted gate 的对照。
+6. 新增测试覆盖 accepted path、utility update、quarantine 迁移和前五轮配置不回归。
+7. 暂缓 tau-bench 接入；待 gate accepted path、utility update 和 quarantine 日志稳定后，再迁移到 tau-bench retail。
 
 ## 实验记录模板
 
