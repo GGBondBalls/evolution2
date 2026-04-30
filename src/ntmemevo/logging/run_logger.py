@@ -18,7 +18,14 @@ class RunLogger:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(self.config_path, self.output_dir / "config.yaml")
         self._write_jsonl(self.output_dir / "tasks.jsonl", [self._task_record(task) for task in tasks], mode="w")
-        for name in ["runs.jsonl", "trace_events.jsonl", "memories.jsonl", "memory_updates.jsonl", "replay_results.jsonl"]:
+        for name in [
+            "runs.jsonl",
+            "trace_events.jsonl",
+            "memories.jsonl",
+            "candidate_memories.jsonl",
+            "memory_updates.jsonl",
+            "replay_results.jsonl",
+        ]:
             path = self.output_dir / name
             path.write_text("", encoding="utf-8")
 

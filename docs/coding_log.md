@@ -166,3 +166,76 @@ Get-Content .\runs\tiny_reflexion_seed1\runs.jsonl -Tail 2
 6. 若时间允许，开始准备污染记忆 fixture，为第五轮 RetrieverGate 和 negative transfer 指标做铺垫。
 
 第四轮暂不建议完整接入 tau-bench；tau-bench 可并行调研，但主编码应先稳定结构化 memory schema，否则真实 benchmark 上的日志和分析字段会反复返工。
+
+## 2026-04-30 第一阶段第四轮
+
+目标：落实结构化 NT-MemEvo candidate memory schema，把项目核心方法的候选记忆单元先落成可校验、可持久化、可供后续 gate / utility / verification 复用的数据结构。
+
+已完成：
+
+1. 新增 `src/ntmemevo/memory/schema.py`，定义 `CandidateMemory`、`MemoryScope`、`MemoryUtility`、`MemoryLifecycle`、`MemorySource`，覆盖 `memory_id`、`type`、`claim`、`scope`、`action_hint`、`avoid_hint`、`positive_evidence`、`negative_evidence`、`utility`、`lifecycle` 和 `source` 字段。
+2. 新增 `candidate_memory_json_schema()` 和 `validate_candidate_memory_json()`，对必填字段、memory type、lifecycle status、证据列表、utility 默认计数和 source 元信息做基础校验。
+3. 新增 `src/ntmemevo/memory/extractor.py`，实现确定性 `CandidateMemoryExtractor`，从 tiny task instruction、trace summary、final answer、reward 和 success 中抽取 candidate memory。
+4. 新增 `src/ntmemevo/memory/store.py`，实现 `CandidateMemoryStore`，支持 `candidate_memories.jsonl` 的读取、追加和写入前校验。
+5. 修改 `run_stream`，支持 `memory.method=nt_memevo_candidate`；本轮只写入 candidate pool，不进行检索注入、verification gate、utility learning 或 quarantine。
+6. 修改 `RunLogger.prepare`，标准输出目录新增初始化 `candidate_memories.jsonl`。
+7. 新增配置 `configs/tiny_nt_memevo_candidate.yaml`，输出目录为 `runs/tiny_nt_memevo_candidate_seed1/`。
+8. 新增测试：candidate schema 往返校验、默认 utility/lifecycle/source 校验，以及 `nt_memevo_candidate` tiny pipeline 写入结构化 candidate memory。
+9. 更新 `README.md`，加入结构化 candidate memory 的运行命令和后续里程碑方向。
+
+验证记录：
+
+1. `conda run -n rm python -m pytest` 通过，结果为 `5 passed in 0.03s`。
+2. `conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml` 成功。
+3. `conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tiny_raw_trace_rag.yaml` 成功。
+4. `conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tiny_reflexion.yaml` 成功。
+5. `conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_candidate.yaml` 成功。
+6. no-memory 结果：`num_tasks=5`，`success_rate=1.0`，`avg_prompt_tokens=310.4`，`memory_size=0`，`memory_top_k=0`。
+7. raw-trace-rag 结果：`num_tasks=5`，`success_rate=1.0`，`avg_prompt_tokens=538.6`，`memory_size=5`，`memory_top_k=2`。
+8. reflexion 结果：`num_tasks=5`，`success_rate=1.0`，`avg_prompt_tokens=832.2`，`memory_size=5`，`memory_top_k=2`。
+9. nt-memevo-candidate 结果：`num_tasks=5`，`success_rate=1.0`，`avg_prompt_tokens=310.4`，`memory_size=5`，`memory_top_k=0`。
+10. `runs/tiny_nt_memevo_candidate_seed1/candidate_memories.jsonl` 已生成 5 条结构化 candidate memory；`memory_updates.jsonl` 中记录 5 条 `candidate_extract` 事件。
+
+用户复验记录：
+
+1. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下运行 `python -m pytest`，结果为 `5 passed in 0.03s`。
+2. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=310.4`、`memory_policy=none`、`memory_size=0`、`memory_top_k=0`。
+3. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_raw_trace_rag.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=538.6`、`memory_policy=raw_trace_rag`、`memory_size=5`、`memory_top_k=2`。
+4. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_reflexion.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=832.2`、`memory_policy=reflexion`、`memory_size=5`、`memory_top_k=2`。
+5. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_candidate.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=310.4`、`memory_policy=nt_memevo_candidate`、`memory_size=5`、`memory_top_k=0`。
+6. 用户检查 `runs/tiny_nt_memevo_candidate_seed1/runs.jsonl`，确认后两条任务 `used_memory_ids=[]`，说明 candidate memory 本轮未注入 prompt。
+7. 用户检查 `runs/tiny_nt_memevo_candidate_seed1/memory_updates.jsonl`，确认 5 条 `candidate_extract` 事件全部写入，candidate 类型覆盖 `tool_usage`、`constraint` 和 `user_policy`。
+8. 用户检查 `runs/tiny_nt_memevo_candidate_seed1/candidate_memories.jsonl`，确认结构化字段完整，`utility`、`lifecycle`、`source`、`positive_evidence` 和 `negative_evidence` 符合第四轮设计。
+
+当前边界：
+
+1. `nt_memevo_candidate` 当前只抽取并写入 candidate pool，不把 candidate memory 注入 agent prompt，因此 prompt token 成本与 no-memory 一致。
+2. utility 字段当前只写入默认先验值：`alpha=1.0`、`beta=1.0`、`mean_delta_reward=0.0`、`lcb_delta_reward=0.0`、`num_used=0`、`num_helpful=0`、`num_harmful=0`。
+3. lifecycle 当前固定为 `status=candidate`，尚未实现 active/quarantined/retired 状态迁移。
+4. extractor 使用确定性规则，适合离线 tiny benchmark 验证 schema 和日志；后续可替换为 LLM extractor。
+5. 本轮仍未实现 RetrieverGate、negative transfer 检测、反事实 replay、verification gate 或 tau-bench retail 接入。
+
+用户复验建议命令：
+
+```powershell
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_reflexion.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_candidate.yaml
+Get-Content .\runs\tiny_nt_memevo_candidate_seed1\metrics.json
+Get-Content .\runs\tiny_nt_memevo_candidate_seed1\candidate_memories.jsonl -TotalCount 2
+Get-Content .\runs\tiny_nt_memevo_candidate_seed1\memory_updates.jsonl -Tail 5
+```
+
+下一步建议：
+
+1. 实现 `RetrieverGate`，基于 similarity、precondition match、utility、risk、age 和 cost 对 candidate / active memory 打分。
+2. 新增 active memory 或 gated candidate retrieval 的最小路径，使结构化 memory 可以被转换为 `RetrievedMemory` 并注入 prompt，但必须记录 gate 决策。
+3. 为 tiny benchmark 增加污染记忆 fixture，使 negative transfer 可以在离线环境中被稳定触发和度量。
+4. 在 `memory_updates.jsonl` 中记录每条候选记忆的 `similarity_score`、`precondition_score`、`utility_score`、`risk_score`、`final_gate_score`、`gate_decision` 和 `rejection_reason`。
+5. 新增 negative transfer 指标占位：`with_memory_fail_no_memory_success`、`harmful_memory_ids`、`memory_attributed_failures` 和 `negative_transfer_rate`。
+6. 新增一组污染实验配置，例如 `configs/tiny_nt_memevo_gate_polluted.yaml`，同时保持 `none / raw_trace_rag / reflexion / nt_memevo_candidate` 四组配置不回归。
+7. 在 tiny gate 与污染日志稳定后，再接入 tau-bench retail，避免真实 benchmark 接入后反复返工 schema。

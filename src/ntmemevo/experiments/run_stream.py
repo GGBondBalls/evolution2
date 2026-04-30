@@ -11,9 +11,11 @@ from ntmemevo.evaluation.metrics import aggregate_results
 from ntmemevo.llm.client import create_llm_client
 from ntmemevo.logging.run_logger import RunLogger
 from ntmemevo.logging.trace_logger import TraceLogger
+from ntmemevo.memory.extractor import CandidateMemoryExtractor
 from ntmemevo.memory.raw_trace_store import RawTraceMemoryStore
 from ntmemevo.memory.reflection_memory import ReflectionExtractor, ReflectionMemoryStore
 from ntmemevo.memory.retriever import LexicalMemoryRetriever
+from ntmemevo.memory.store import CandidateMemoryStore
 from ntmemevo.types import AgentResult
 
 
@@ -43,11 +45,13 @@ def run(config_path: str) -> dict[str, Any]:
     memory_policy = str(memory_config.get("method", "none")).lower()
     memory_top_k = int(memory_config.get("top_k", config.agent.get("memory_top_k", 0)))
     memory_store = None
+    retrieval_enabled = False
     if memory_policy == "raw_trace_rag":
         memory_store = RawTraceMemoryStore(
             path=config.output_dir / "memories.jsonl",
             save_failures=bool(memory_config.get("save_failures", True)),
         )
+        retrieval_enabled = True
     elif memory_policy == "reflexion":
         extractor = ReflectionExtractor(
             max_reflection_chars=int(memory_config.get("max_reflection_chars", 700)),
@@ -58,8 +62,27 @@ def run(config_path: str) -> dict[str, Any]:
             save_failures=bool(memory_config.get("save_failures", True)),
             extractor=extractor,
         )
+        retrieval_enabled = True
+    elif memory_policy == "nt_memevo_candidate":
+        extractor = CandidateMemoryExtractor(
+            extractor_model=str(
+                memory_config.get("extractor_model", "deterministic_candidate_extractor_v1")
+            ),
+            domain=str(memory_config.get("domain", "retail")),
+            ttl=int(memory_config.get("ttl", 50)),
+            max_claim_chars=int(memory_config.get("max_claim_chars", 700)),
+        )
+        memory_store = CandidateMemoryStore(
+            path=config.output_dir / "candidate_memories.jsonl",
+            benchmark=str(config.benchmark.get("name", "unknown_benchmark")),
+            experiment_id=experiment_id,
+            save_successes=bool(memory_config.get("save_successes", True)),
+            save_failures=bool(memory_config.get("save_failures", True)),
+            extractor=extractor,
+        )
     elif memory_policy not in {"none", "null"}:
         raise ValueError(f"Unsupported memory method: {memory_policy}")
+    effective_memory_top_k = memory_top_k if retrieval_enabled else 0
 
     results: list[AgentResult] = []
     for index, task in enumerate(tasks, start=1):
@@ -67,10 +90,10 @@ def run(config_path: str) -> dict[str, Any]:
         trace_logger = TraceLogger(run_logger=run_logger, run_id=run_id)
 
         memories = []
-        if memory_store is not None:
+        if memory_store is not None and retrieval_enabled:
             memories = LexicalMemoryRetriever(memory_store.all()).retrieve(
                 query=task.instruction,
-                top_k=memory_top_k,
+                top_k=effective_memory_top_k,
             )
             run_logger.append_jsonl(
                 "memory_updates.jsonl",
@@ -95,17 +118,38 @@ def run(config_path: str) -> dict[str, Any]:
         )
 
         if memory_store is not None:
-            memory = memory_store.add_from_result(task=task, result=result, iteration=index)
+            if memory_policy == "nt_memevo_candidate":
+                memory = memory_store.add_from_result(
+                    task=task,
+                    result=result,
+                    iteration=index,
+                    run_id=run_id,
+                )
+            else:
+                memory = memory_store.add_from_result(task=task, result=result, iteration=index)
+            event_type = "candidate_extract" if memory_policy == "nt_memevo_candidate" else "add"
             run_logger.append_jsonl(
                 "memory_updates.jsonl",
                 {
-                    "event_type": "add",
+                    "event_type": event_type,
                     "iteration": index,
                     "task_id": task.task_id,
                     "memory_policy": memory_policy,
                     "memory_id": memory.memory_id if memory else None,
                     "memory_kind": memory.__class__.__name__ if memory else None,
+                    "candidate_type": getattr(memory, "type", None) if memory else None,
+                    "candidate_status": (
+                        getattr(memory, "lifecycle", None).status
+                        if memory and getattr(memory, "lifecycle", None)
+                        else None
+                    ),
                     "reflection_type": getattr(memory, "reflection_type", None) if memory else None,
+                    "positive_evidence": (
+                        list(getattr(memory, "positive_evidence", ())) if memory else []
+                    ),
+                    "negative_evidence": (
+                        list(getattr(memory, "negative_evidence", ())) if memory else []
+                    ),
                     "success": result.success,
                     "reward": result.reward,
                 },
@@ -114,7 +158,7 @@ def run(config_path: str) -> dict[str, Any]:
     metrics = aggregate_results(results)
     metrics["memory_policy"] = memory_policy
     metrics["memory_size"] = len(memory_store.all()) if memory_store is not None else 0
-    metrics["memory_top_k"] = memory_top_k
+    metrics["memory_top_k"] = effective_memory_top_k
     run_logger.write_metrics(metrics)
     return metrics
 
