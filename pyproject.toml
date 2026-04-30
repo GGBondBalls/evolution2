@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ntmemevo"
+version = "0.1.0"
+description = "Negative-transfer-aware memory evolution experiments for LLM agents."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "PyYAML>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+]
+openai = [
+  "openai>=1.30.0",
+]
+
+[project.scripts]
+ntmemevo-run-stream = "ntmemevo.experiments.run_stream:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

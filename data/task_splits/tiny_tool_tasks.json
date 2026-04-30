@@ -1,0 +1,32 @@
+[
+  {
+    "task_id": "tiny_order_status_001",
+    "instruction": "Find the delivery status for order ORD-1001.",
+    "expected_answer_contains": ["delivered"],
+    "initial_state": {}
+  },
+  {
+    "task_id": "tiny_inventory_001",
+    "instruction": "Check whether SKU-RED-M is in stock.",
+    "expected_answer_contains": ["in_stock"],
+    "initial_state": {}
+  },
+  {
+    "task_id": "tiny_refund_001",
+    "instruction": "Decide whether order ORD-1002 can be refunded.",
+    "expected_answer_contains": ["not refundable"],
+    "initial_state": {}
+  },
+  {
+    "task_id": "tiny_exchange_001",
+    "instruction": "For order ORD-1003, verify whether SKU-BLUE-S can be used as an exchange replacement.",
+    "expected_answer_contains": ["exchange eligible"],
+    "initial_state": {}
+  },
+  {
+    "task_id": "tiny_policy_001",
+    "instruction": "Look up the return window policy for delivered retail orders.",
+    "expected_answer_contains": ["30 days"],
+    "initial_state": {}
+  }
+]
