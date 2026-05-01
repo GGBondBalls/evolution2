@@ -14,6 +14,7 @@ Current scope:
 8. Generate structured NT-MemEvo candidate memories with scope, evidence, utility, lifecycle, and source fields.
 9. Run risk-aware gated retrieval over structured candidate memories and log every gate decision.
 10. Bootstrap polluted candidate memories to test negative-transfer detection and gate rejection.
+11. Update used candidate-memory utility online and apply minimal lifecycle transitions to active or quarantined states.
 
 ## Environment
 
@@ -50,6 +51,12 @@ Risk-aware NT-MemEvo gated retrieval:
 
 ```powershell
 python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate.yaml
+```
+
+Repeated-intent utility update check:
+
+```powershell
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_repeated.yaml
 ```
 
 Polluted-memory gate check:
@@ -99,7 +106,23 @@ gate_decision
 rejection_reason
 ```
 
+When a gated memory is actually injected into the agent context, `memory_updates.jsonl` also includes `utility_update` events with:
+
+```text
+outcome
+baseline_reward
+delta_reward
+utility_before
+utility_after
+lifecycle_before
+lifecycle_after
+positive_evidence
+negative_evidence
+```
+
 `metrics.json` also includes `with_memory_fail_no_memory_success`, `negative_transfer_rate`, `harmful_memory_ids`, and gate acceptance/rejection counts.
+For structured candidate-memory runs it additionally reports utility update counts and lifecycle counts:
+`utility_update_count`, `utility_helpful_count`, `utility_harmful_count`, `candidate_memory_count`, `active_memory_count`, and `quarantined_memory_count`.
 
 ## Tests
 
@@ -109,9 +132,9 @@ pytest
 
 ## Next Milestone
 
-The next coding round should add risk-aware retrieval, verification, or connect tau-bench:
+The next coding round should add replay-backed verification or connect tau-bench:
 
-1. Add online utility updates for memories that pass the gate and are actually used.
-2. Add verification-gated consolidation from candidate pool to active memory.
-3. Add replay or leave-one-memory-out estimation for higher-confidence negative-transfer attribution.
+1. Add leave-one-memory-out replay for higher-confidence negative-transfer attribution.
+2. Add verification-gated consolidation beyond the current deterministic lifecycle thresholds.
+3. Add repeated-intent and polluted splits with broader task diversity.
 4. Wire the tau-bench adapter to replace the toy environment.

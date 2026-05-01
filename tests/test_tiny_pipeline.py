@@ -435,6 +435,121 @@ logging:
     assert any(record.get("gate_decision") == "accept" for record in update_records)
 
 
+def test_nt_memevo_gate_updates_utility_and_promotes_active_memory(tmp_path: Path) -> None:
+    split_file = tmp_path / "repeated_tasks.json"
+    split_file.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "tiny_order_repeat_001",
+                    "instruction": "Find the delivery status for order ORD-1001.",
+                    "expected_answer_contains": ["delivered"],
+                    "initial_state": {},
+                    "no_memory_success": True,
+                },
+                {
+                    "task_id": "tiny_order_repeat_002",
+                    "instruction": "Find the delivery status for order ORD-1001.",
+                    "expected_answer_contains": ["delivered"],
+                    "initial_state": {},
+                    "no_memory_success": True,
+                },
+                {
+                    "task_id": "tiny_order_repeat_003",
+                    "instruction": "Find the delivery status for order ORD-1001.",
+                    "expected_answer_contains": ["delivered"],
+                    "initial_state": {},
+                    "no_memory_success": True,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config_nt_gate_utility.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate_utility"
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_utility_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 2
+models:
+  actor:
+    provider: mock
+    model: mock-tool-agent
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 2
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  utility:
+    promote_after_helpful: 2
+    quarantine_after_harmful: 1
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    reject_negative_evidence: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == 1.0
+    assert metrics["gate_accepted_count"] >= 3
+    assert metrics["utility_update_count"] == 3
+    assert metrics["utility_helpful_count"] == 3
+    assert metrics["utility_harmful_count"] == 0
+    assert metrics["active_memory_count"] == 1
+
+    candidate_records = [
+        json.loads(line)
+        for line in (output_dir / "candidate_memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    first_memory = next(
+        record
+        for record in candidate_records
+        if record["memory_id"] == "cand_000001_tiny_order_repeat_001"
+    )
+
+    assert len(candidate_records) == 3
+    assert first_memory["utility"]["num_used"] == 2
+    assert first_memory["utility"]["num_helpful"] == 2
+    assert first_memory["utility"]["num_harmful"] == 0
+    assert first_memory["lifecycle"]["status"] == "active"
+    assert first_memory["lifecycle"]["last_used_iter"] == 3
+    assert any(
+        record.get("event_type") == "utility_update"
+        and record.get("outcome") == "helpful"
+        and record.get("lifecycle_before", {}).get("status") == "candidate"
+        and record.get("lifecycle_after", {}).get("status") == "active"
+        for record in update_records
+    )
+
+
 def test_nt_memevo_gate_rejects_polluted_bootstrap_memory(tmp_path: Path) -> None:
     config_path = tmp_path / "config_nt_gate_polluted.yaml"
     output_dir = tmp_path / "runs" / "nt_gate_polluted"
@@ -579,3 +694,30 @@ logging:
     assert metrics["with_memory_fail_no_memory_success"] == 1
     assert metrics["negative_transfer_rate"] == 1.0
     assert metrics["harmful_memory_ids"] == ["polluted_refund_lookup_policy_001"]
+    assert metrics["utility_update_count"] == 1
+    assert metrics["utility_harmful_count"] == 1
+    assert metrics["quarantined_memory_count"] == 1
+
+    candidate_records = [
+        json.loads(line)
+        for line in (output_dir / "candidate_memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    polluted = next(
+        record for record in candidate_records if record["memory_id"] == "polluted_refund_lookup_policy_001"
+    )
+
+    assert polluted["utility"]["num_used"] == 3
+    assert polluted["utility"]["num_harmful"] == 3
+    assert polluted["lifecycle"]["status"] == "quarantined"
+    assert polluted["lifecycle"]["last_used_iter"] == 1
+    assert "tiny_nt_gate_unsafe_polluted_test_tiny_refund_polluted_001" in polluted["negative_evidence"]
+    assert any(
+        record.get("event_type") == "utility_update"
+        and record.get("memory_id") == "polluted_refund_lookup_policy_001"
+        and record.get("outcome") == "harmful"
+        for record in update_records
+    )

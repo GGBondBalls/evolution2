@@ -351,3 +351,120 @@ tail -n 10 runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/runs.jsonl
 5. 对 `tiny_nt_memevo_gate_unsafe_polluted.yaml` 做用户复验，确认 unsafe ablation 的 `negative_transfer_rate=1.0` 和 `harmful_memory_ids=["polluted_refund_lookup_policy_001"]`。
 6. 新增测试覆盖：accepted candidate 的 utility 增量、harmful memory 的 `num_harmful` 增量、`last_used_iter` 更新、utility update 日志字段，以及前五轮配置不回归。
 7. 第六轮仍建议暂缓 tau-bench 接入；待 gate accepted path、utility update 和 quarantine 日志稳定后，再把同一套机制迁移到 tau-bench retail。
+
+## 2026-05-01 第一阶段第六轮
+
+目标：落实 online utility update，并补齐 repeated-intent tiny 任务，使 `nt_memevo_gate` 在安全场景中出现稳定 accepted path；同时让 unsafe polluted ablation 中的有害记忆被在线反馈更新并进入 quarantine。
+
+已完成：
+
+1. 新增 `CandidateMemoryStore.update_utility()`，对被 gate 接受并实际注入 agent prompt 的 candidate memory 做在线更新。
+2. utility 更新覆盖 `num_used`、`num_helpful`、`num_harmful`、`alpha`、`beta`、`mean_delta_reward`、`lcb_delta_reward`。
+3. lifecycle 更新覆盖 `last_used_iter`，并实现最小确定性状态迁移：累计 helpful 达到阈值且无 harmful/negative evidence 时从 `candidate` 提升为 `active`；出现 harmful 或 negative evidence 时进入 `quarantined`。
+4. `run_stream` 在 `memory.method=nt_memevo_gate` 且 `used_memory_ids` 非空时调用 utility update，并向 `memory_updates.jsonl` 写入 `utility_update` 事件。
+5. `utility_update` 事件记录 `outcome`、`baseline_reward`、`delta_reward`、更新前后 `utility`、更新前后 `lifecycle`、正负 evidence、任务结果和 run id。
+6. `metrics.json` 新增 `utility_update_count`、`utility_helpful_count`、`utility_harmful_count`、`utility_neutral_count`、`candidate_memory_count`、`active_memory_count`、`quarantined_memory_count` 和 `retired_memory_count`。
+7. 新增 repeated-intent split：`data/task_splits/tiny_repeated_intent_tasks.json`，包含 3 个连续 `order_status` 任务。
+8. 新增配置 `configs/tiny_nt_memevo_gate_repeated.yaml`，用于稳定验证同 intent candidate 被接受、使用、更新并 promotion 为 active。
+9. 扩展 unsafe polluted 测试，确认污染记忆被接受导致失败后，`num_harmful` 增加、`negative_evidence` 追加当前 run、`last_used_iter` 更新，并进入 `quarantined`。
+10. 新增/更新测试覆盖：safe accepted utility update、active promotion、harmful utility update、quarantine、utility update 日志字段，以及前五轮 pipeline 不回归。
+11. 更新 `README.md`，加入 repeated utility update 运行命令、`utility_update` 日志字段和新增 metrics 字段。
+
+关键实现说明：
+
+1. 本轮采用 Level 1 outcome update，不做 replay 反事实归因。`alpha += reward`、`beta += 1 - reward`，`helpful` 由任务成功近似判定，`harmful` 由“使用了记忆、任务失败、且任务元信息认为 no-memory 可成功”近似判定。
+2. `delta_reward` 使用 `reward - no_memory_reward` 的在线代理值；若任务未提供 `no_memory_reward`，则由 `no_memory_success` 推断为 1.0 或 0.0。
+3. `mean_delta_reward` 和 `lcb_delta_reward` 是在线代理统计，不等价于严格 causal effect；后续仍需要 leave-one-memory-out replay。
+4. promotion 默认阈值为 `memory.utility.promote_after_helpful=2`，quarantine 默认阈值为 `memory.utility.quarantine_after_harmful=1`。
+5. `candidate_memories.jsonl` 在 utility update 后会被重写，保证最终文件体现最新 utility、evidence 和 lifecycle；随后当前任务仍会抽取新 candidate 并追加。
+
+验证记录：
+
+1. `python -m pytest` 通过，结果为 `10 passed in 0.07s`。
+2. 本地 shell 未安装 editable 包，编码侧 smoke 使用 `PYTHONPATH=src python -m ...`；用户在 `conda activate rm` 且 `pip install -e ".[dev]"` 后可直接运行 `python -m ...`。
+3. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml` 成功：`success_rate=1.0`、`memory_size=0`、`negative_transfer_rate=0.0`、`utility_update_count=0`。
+4. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_raw_trace_rag.yaml` 成功：`success_rate=1.0`、`memory_size=5`、`negative_transfer_rate=0.0`、`utility_update_count=0`。
+5. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_reflexion.yaml` 成功：`success_rate=1.0`、`memory_size=5`、`negative_transfer_rate=0.0`、`utility_update_count=0`。
+6. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_candidate.yaml` 成功：`success_rate=1.0`、`memory_size=5`、`candidate_memory_count=5`、`utility_update_count=0`。
+7. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate.yaml` 成功：`success_rate=1.0`、`memory_size=5`、`gate_decision_count=10`、`gate_accepted_count=0`、`gate_rejected_count=10`、`utility_update_count=0`。
+8. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_repeated.yaml` 成功：`num_tasks=3`、`success_rate=1.0`、`memory_size=3`、`memory_top_k=2`、`gate_decision_count=3`、`gate_accepted_count=3`、`utility_update_count=3`、`utility_helpful_count=3`、`active_memory_count=1`、`candidate_memory_count=2`。
+9. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_polluted.yaml` 成功：`success_rate=1.0`、`memory_size=6`、`gate_decision_count=15`、`gate_accepted_count=0`、`gate_rejected_count=15`、`gate_rejection_reasons={"negative_evidence_present": 5, "precondition_below_threshold": 10}`、`utility_update_count=0`、`negative_transfer_rate=0.0`。
+10. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_unsafe_polluted.yaml` 成功触发负迁移和 quarantine：`num_tasks=1`、`success_rate=0.0`、`with_memory_fail_no_memory_success=1`、`negative_transfer_rate=1.0`、`harmful_memory_ids=["polluted_refund_lookup_policy_001"]`、`utility_update_count=1`、`utility_harmful_count=1`、`quarantined_memory_count=1`。
+
+用户复验记录：
+
+1. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下运行 `python -m pytest`，环境为 Python 3.12.13、pytest 9.0.3、pluggy 1.6.0，结果为 `10 passed in 0.05s`。
+2. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=310.4`、`memory_policy=none`、`memory_size=0`、`negative_transfer_rate=0.0`、`utility_update_count=0`。
+3. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_raw_trace_rag.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=538.6`、`memory_policy=raw_trace_rag`、`memory_size=5`、`negative_transfer_rate=0.0`、`utility_update_count=0`。
+4. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_reflexion.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=832.2`、`memory_policy=reflexion`、`memory_size=5`、`negative_transfer_rate=0.0`、`utility_update_count=0`。
+5. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_candidate.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=310.4`、`memory_policy=nt_memevo_candidate`、`memory_size=5`、`candidate_memory_count=5`、`active_memory_count=0`、`quarantined_memory_count=0`。
+6. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate.yaml`，结果为 `success_rate=1.0`、`memory_size=5`、`gate_decision_count=10`、`gate_accepted_count=0`、`gate_rejected_count=10`、`gate_rejection_reasons={"precondition_below_threshold": 10}`、`utility_update_count=0`。
+7. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_repeated.yaml`，结果为 `num_tasks=3`、`success_rate=1.0`、`memory_size=3`、`memory_top_k=2`、`gate_decision_count=3`、`gate_accepted_count=3`、`gate_rejected_count=0`、`utility_update_count=3`、`utility_helpful_count=3`、`active_memory_count=1`、`candidate_memory_count=2`。
+8. 用户检查 `runs/tiny_nt_memevo_gate_repeated_seed1/memory_updates.jsonl`，确认 3 条 `utility_update` 均为 `outcome=helpful`；其中 `cand_000001_tiny_order_repeat_001` 在 iteration 2 和 3 被两次更新，最终 `alpha=3.0`、`beta=1.0`、`num_used=2`、`num_helpful=2`、`lifecycle.status=active`、`last_used_iter=3`。
+9. 用户检查 `runs/tiny_nt_memevo_gate_repeated_seed1/candidate_memories.jsonl`，确认第一条 repeated memory 已提升为 `active`，第二条保持 `candidate` 且 `num_used=1`，第三条保持未使用的 `candidate`。
+10. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_polluted.yaml`，结果为 `success_rate=1.0`、`memory_size=6`、`gate_decision_count=15`、`gate_accepted_count=0`、`gate_rejected_count=15`、`gate_rejection_reasons={"negative_evidence_present": 5, "precondition_below_threshold": 10}`、`utility_update_count=0`、`negative_transfer_rate=0.0`。
+11. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_unsafe_polluted.yaml`，结果为 `num_tasks=1`、`success_rate=0.0`、`with_memory_fail_no_memory_success=1`、`negative_transfer_rate=1.0`、`harmful_memory_ids=["polluted_refund_lookup_policy_001"]`、`gate_accepted_count=1`、`utility_update_count=1`、`utility_harmful_count=1`、`quarantined_memory_count=1`。
+12. 用户检查 `runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/memory_updates.jsonl`，确认污染记忆先被 bootstrap 导入，随后在 unsafe gate 下被接受并检索注入，最后产生 `outcome=harmful` 的 `utility_update`。
+13. 用户检查 `runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/candidate_memories.jsonl`，确认污染记忆最终 `alpha=1.0`、`beta=4.0`、`mean_delta_reward=-1.0`、`lcb_delta_reward=-1.0`、`num_used=3`、`num_harmful=3`、`lifecycle.status=quarantined`、`last_used_iter=1`，并追加当前失败 run 到 `negative_evidence`。
+
+当前边界：
+
+1. utility update 仍是在线近似，不证明被注入记忆对成功有因果贡献；成功任务只作为 Level 1 helpful signal。
+2. `mean_delta_reward` 和 `lcb_delta_reward` 目前使用 no-memory 元信息推断的代理 baseline，尚未通过 replay 得到真实反事实差值。
+3. lifecycle promotion/quarantine 是确定性阈值，不是 verification-gated consolidation。
+4. repeated-intent split 使用同一个 `ORD-1001` order-status 任务，主要用于稳定覆盖 accepted utility path，不代表真实 benchmark 难度。
+5. `tiny_nt_memevo_gate.yaml` 主五任务仍因 intent 不同而全部拒绝跨 intent candidate，这是 gate 的保守行为，不是 utility update 的主要验收配置。
+6. 仍未接入 tau-bench retail、embedding retrieval、learned ranker 或 leave-one-memory-out replay。
+
+复验命令归档：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_reflexion.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_candidate.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_repeated.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_polluted.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_unsafe_polluted.yaml
+
+cat runs/tiny_nt_memevo_gate_repeated_seed1/metrics.json
+grep '"event_type": "utility_update"' runs/tiny_nt_memevo_gate_repeated_seed1/memory_updates.jsonl
+head -n 3 runs/tiny_nt_memevo_gate_repeated_seed1/candidate_memories.jsonl
+
+cat runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/metrics.json
+grep 'polluted_refund_lookup_policy_001' runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/memory_updates.jsonl
+head -n 2 runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/candidate_memories.jsonl
+```
+
+实验日志更新状态：
+
+1. `docs/experiment_log.md` 已补齐 `tiny_nt_memevo_gate_repeated_seed1` 的第六轮用户复验结果，记录同 intent memory 被 gate 接受、`utility_update_count=3`、`utility_helpful_count=3`，以及 1 条 memory 进入 `active`。
+2. `docs/experiment_log.md` 已补齐 `tiny_nt_memevo_gate_unsafe_polluted_seed1` 的第六轮用户复验结果，记录 unsafe gate 接受污染记忆后失败、`negative_transfer_rate=1.0`、`utility_harmful_count=1` 和 `quarantined_memory_count=1`。
+3. `docs/experiment_log.md` 已更新 `tiny_nt_memevo_gate_polluted_seed1` 和 `tiny_nt_memevo_gate_seed1` 的第六轮新增 utility/lifecycle 指标，说明拒绝路径不会触发 utility update。
+
+下一步建议：
+
+1. 实现 leave-one-memory-out replay，把 online proxy negative transfer 升级为局部反事实估计。
+2. 实现 verification-gated consolidation，将 `candidate -> active` 从简单阈值升级为 support task replay 验证。
+3. 为 repeated-intent tiny split 增加不同 order id、refund 和 exchange 的安全重复任务，避免只验证单一工具路径。
+4. 在 utility/replay 日志稳定后接入 tau-bench retail。
+
+## 第一阶段第七轮方向
+
+优先方向：实现 leave-one-memory-out replay，并把第六轮的 online proxy utility update 升级为 replay-backed utility update。理由是第六轮已经证明 safe accepted path、active promotion、unsafe harmful update 和 quarantine 都能稳定复现；下一步需要补上论文定义中更关键的局部反事实证据，避免只依赖“使用记忆后任务成功/失败”的粗粒度归因。
+
+第七轮建议范围：
+
+1. 新增 replay runner：对单个已完成任务支持 `with selected memory`、`without selected memory` 和 `leave-one-memory-out` 三种重放模式。
+2. 对 `nt_memevo_gate` 中实际注入的 top-k memory 做局部反事实 replay，计算 `delta_reward`、`delta_success` 和 replay-based harmful/helpful 判断。
+3. 将 replay 结果写入 `replay_results.jsonl`，字段至少包括 `replay_id`、`source_run_id`、`task_id`、`memory_id`、`mode`、`with_reward`、`without_reward`、`delta_reward`、`with_success`、`without_success`、`attribution_label`。
+4. 在 `memory_updates.jsonl` 中新增 `replay_utility_update` 或扩展 `utility_update`，区分 `credit_source=online_proxy|leave_one_memory_out`。
+5. 将 `mean_delta_reward` 和 `lcb_delta_reward` 优先由 replay delta 更新；没有 replay 时保留第六轮 online proxy fallback。
+6. 将 `candidate -> active` promotion 从单纯 `num_helpful` 阈值升级为 replay/support-task 验证门控；污染或 replay-harmful memory 继续进入 `quarantined`。
+7. 新增测试覆盖 repeated safe replay、unsafe polluted replay、replay_results 日志字段、replay-backed utility update 和第六轮全部配置不回归。
+8. 第七轮仍建议暂缓 tau-bench 接入；待 replay attribution 和 consolidation 日志稳定后再迁移真实 benchmark。

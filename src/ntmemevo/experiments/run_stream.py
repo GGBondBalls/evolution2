@@ -18,7 +18,7 @@ from ntmemevo.memory.gate import GateDecision, RetrieverGate, RetrieverGateConfi
 from ntmemevo.memory.raw_trace_store import RawTraceMemoryStore
 from ntmemevo.memory.reflection_memory import ReflectionExtractor, ReflectionMemoryStore
 from ntmemevo.memory.retriever import LexicalMemoryRetriever
-from ntmemevo.memory.store import CandidateMemoryStore
+from ntmemevo.memory.store import CandidateMemoryStore, UtilityUpdate
 from ntmemevo.types import AgentResult
 
 
@@ -51,6 +51,10 @@ def run(config_path: str) -> dict[str, Any]:
     gate_config: RetrieverGateConfig | None = None
     retrieval_enabled = False
     gate_decisions: list[GateDecision] = []
+    utility_updates: list[UtilityUpdate] = []
+    utility_config = memory_config.get("utility", {}) or {}
+    promote_after_helpful = int(utility_config.get("promote_after_helpful", 2))
+    quarantine_after_harmful = int(utility_config.get("quarantine_after_harmful", 1))
     if memory_policy == "raw_trace_rag":
         memory_store = RawTraceMemoryStore(
             path=config.output_dir / "memories.jsonl",
@@ -110,6 +114,14 @@ def run(config_path: str) -> dict[str, Any]:
     elif memory_policy not in {"none", "null"}:
         raise ValueError(f"Unsupported memory method: {memory_policy}")
     effective_memory_top_k = memory_top_k if retrieval_enabled else 0
+    no_memory_success_by_task = {
+        task.task_id: bool(task.metadata.get("no_memory_success", True))
+        for task in tasks
+    }
+    no_memory_reward_by_task = {
+        task.task_id: task.metadata.get("no_memory_reward")
+        for task in tasks
+    }
 
     results: list[AgentResult] = []
     for index, task in enumerate(tasks, start=1):
@@ -169,6 +181,37 @@ def run(config_path: str) -> dict[str, Any]:
             result=result,
             memory_policy=memory_policy,
         )
+        if (
+            memory_policy == "nt_memevo_gate"
+            and isinstance(memory_store, CandidateMemoryStore)
+            and result.used_memory_ids
+        ):
+            for memory_id in result.used_memory_ids:
+                update = memory_store.update_utility(
+                    memory_id=memory_id,
+                    result=result,
+                    iteration=index,
+                    run_id=run_id,
+                    no_memory_success=no_memory_success_by_task.get(task.task_id, True),
+                    no_memory_reward=no_memory_reward_by_task.get(task.task_id),
+                    promote_after_helpful=promote_after_helpful,
+                    quarantine_after_harmful=quarantine_after_harmful,
+                )
+                utility_updates.append(update)
+                record = update.to_json()
+                record.update(
+                    {
+                        "event_type": "utility_update",
+                        "iteration": index,
+                        "task_id": task.task_id,
+                        "run_id": run_id,
+                        "memory_policy": memory_policy,
+                        "success": result.success,
+                        "reward": result.reward,
+                        "error_type": result.error_type,
+                    }
+                )
+                run_logger.append_jsonl("memory_updates.jsonl", record)
 
         if memory_store is not None:
             if memory_policy in {"nt_memevo_candidate", "nt_memevo_gate"}:
@@ -213,10 +256,6 @@ def run(config_path: str) -> dict[str, Any]:
             )
 
     metrics = aggregate_results(results)
-    no_memory_success_by_task = {
-        task.task_id: bool(task.metadata.get("no_memory_success", True))
-        for task in tasks
-    }
     metrics.update(
         aggregate_negative_transfer(
             results=results,
@@ -238,6 +277,17 @@ def run(config_path: str) -> dict[str, Any]:
         1 for decision in gate_decisions if decision.gate_decision == "reject"
     )
     metrics["gate_rejection_reasons"] = dict(sorted(gate_reason_counts.items()))
+    utility_outcome_counts = Counter(update.outcome for update in utility_updates)
+    metrics["utility_update_count"] = len(utility_updates)
+    metrics["utility_helpful_count"] = utility_outcome_counts.get("helpful", 0)
+    metrics["utility_harmful_count"] = utility_outcome_counts.get("harmful", 0)
+    metrics["utility_neutral_count"] = utility_outcome_counts.get("neutral", 0)
+    if isinstance(memory_store, CandidateMemoryStore):
+        lifecycle_counts = Counter(memory.lifecycle.status for memory in memory_store.all())
+        metrics["candidate_memory_count"] = lifecycle_counts.get("candidate", 0)
+        metrics["active_memory_count"] = lifecycle_counts.get("active", 0)
+        metrics["quarantined_memory_count"] = lifecycle_counts.get("quarantined", 0)
+        metrics["retired_memory_count"] = lifecycle_counts.get("retired", 0)
     run_logger.write_metrics(metrics)
     return metrics
 

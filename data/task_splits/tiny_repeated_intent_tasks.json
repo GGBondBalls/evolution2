@@ -1,0 +1,23 @@
+[
+  {
+    "task_id": "tiny_order_repeat_001",
+    "instruction": "Find the delivery status for order ORD-1001.",
+    "expected_answer_contains": ["delivered"],
+    "initial_state": {},
+    "no_memory_success": true
+  },
+  {
+    "task_id": "tiny_order_repeat_002",
+    "instruction": "Find the delivery status for order ORD-1001.",
+    "expected_answer_contains": ["delivered"],
+    "initial_state": {},
+    "no_memory_success": true
+  },
+  {
+    "task_id": "tiny_order_repeat_003",
+    "instruction": "Find the delivery status for order ORD-1001.",
+    "expected_answer_contains": ["delivered"],
+    "initial_state": {},
+    "no_memory_success": true
+  }
+]
