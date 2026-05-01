@@ -550,6 +550,156 @@ logging:
     )
 
 
+def test_nt_memevo_gate_replay_updates_utility_and_promotes_active_memory(tmp_path: Path) -> None:
+    split_file = tmp_path / "memory_dependent_tasks.json"
+    split_file.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "tiny_memory_order_seed_001",
+                    "instruction": "Find the delivery status for order ORD-1001.",
+                    "expected_answer_contains": ["delivered"],
+                    "initial_state": {},
+                    "no_memory_success": True,
+                    "no_memory_reward": 1.0,
+                },
+                {
+                    "task_id": "tiny_memory_order_replay_002",
+                    "instruction": (
+                        "Find the delivery status for the same order from the prior "
+                        "order-status example."
+                    ),
+                    "expected_answer_contains": ["delivered"],
+                    "initial_state": {},
+                    "no_memory_success": False,
+                    "no_memory_reward": 0.0,
+                },
+                {
+                    "task_id": "tiny_memory_order_replay_003",
+                    "instruction": (
+                        "Find the delivery status for the same order from the prior "
+                        "order-status example."
+                    ),
+                    "expected_answer_contains": ["delivered"],
+                    "initial_state": {},
+                    "no_memory_success": False,
+                    "no_memory_reward": 0.0,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config_nt_gate_replay.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate_replay"
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_replay_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 1
+models:
+  actor:
+    provider: mock
+    model: mock-memory-sensitive-agent
+    follow_memory_hints: true
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 1
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  utility:
+    promote_after_helpful: 2
+    quarantine_after_harmful: 1
+  replay:
+    enabled: true
+    delta_threshold: 0.0
+    max_memories: 1
+    log_context_modes: true
+    promote_requires_positive_lcb: true
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    weight_utility: 0.60
+    reject_negative_evidence: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == 1.0
+    assert metrics["gate_accepted_count"] == 2
+    assert metrics["replay_leave_one_count"] == 2
+    assert metrics["replay_helpful_count"] == 2
+    assert metrics["replay_harmful_count"] == 0
+    assert metrics["replay_utility_update_count"] == 2
+    assert metrics["online_proxy_utility_update_count"] == 0
+    assert metrics["utility_helpful_count"] == 2
+    assert metrics["active_memory_count"] == 1
+
+    candidate_records = [
+        json.loads(line)
+        for line in (output_dir / "candidate_memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    replay_records = [
+        json.loads(line)
+        for line in (output_dir / "replay_results.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    first_memory = next(
+        record
+        for record in candidate_records
+        if record["memory_id"] == "cand_000001_tiny_memory_order_seed_001"
+    )
+    leave_one_records = [
+        record for record in replay_records if record["mode"] == "leave_one_memory_out"
+    ]
+
+    assert first_memory["utility"]["num_used"] == 2
+    assert first_memory["utility"]["num_helpful"] == 2
+    assert first_memory["utility"]["mean_delta_reward"] == 1.0
+    assert first_memory["utility"]["lcb_delta_reward"] > 0.0
+    assert first_memory["lifecycle"]["status"] == "active"
+    assert first_memory["lifecycle"]["last_used_iter"] == 3
+    assert {record["mode"] for record in replay_records} == {
+        "with_selected_memory",
+        "without_selected_memory",
+        "leave_one_memory_out",
+    }
+    assert len(leave_one_records) == 2
+    assert all(record["delta_reward"] == 1.0 for record in leave_one_records)
+    assert all(record["attribution_label"] == "helpful" for record in leave_one_records)
+    assert any(
+        record.get("event_type") == "utility_update"
+        and record.get("credit_source") == "leave_one_memory_out"
+        and record.get("replay_attribution_label") == "helpful"
+        and record.get("lifecycle_after", {}).get("status") == "active"
+        for record in update_records
+    )
+
+
 def test_nt_memevo_gate_rejects_polluted_bootstrap_memory(tmp_path: Path) -> None:
     config_path = tmp_path / "config_nt_gate_polluted.yaml"
     output_dir = tmp_path / "runs" / "nt_gate_polluted"
@@ -672,6 +822,12 @@ memory:
   extractor_model: deterministic_candidate_extractor_v1
   domain: retail
   ttl: 50
+  replay:
+    enabled: true
+    delta_threshold: 0.0
+    max_memories: 1
+    log_context_modes: true
+    promote_requires_positive_lcb: true
   gate:
     min_score: -1.0
     min_similarity: 0.0
@@ -696,11 +852,19 @@ logging:
     assert metrics["harmful_memory_ids"] == ["polluted_refund_lookup_policy_001"]
     assert metrics["utility_update_count"] == 1
     assert metrics["utility_harmful_count"] == 1
+    assert metrics["replay_leave_one_count"] == 1
+    assert metrics["replay_harmful_count"] == 1
+    assert metrics["replay_utility_update_count"] == 1
+    assert metrics["online_proxy_utility_update_count"] == 0
     assert metrics["quarantined_memory_count"] == 1
 
     candidate_records = [
         json.loads(line)
         for line in (output_dir / "candidate_memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    replay_records = [
+        json.loads(line)
+        for line in (output_dir / "replay_results.jsonl").read_text(encoding="utf-8").strip().splitlines()
     ]
     update_records = [
         json.loads(line)
@@ -716,8 +880,17 @@ logging:
     assert polluted["lifecycle"]["last_used_iter"] == 1
     assert "tiny_nt_gate_unsafe_polluted_test_tiny_refund_polluted_001" in polluted["negative_evidence"]
     assert any(
+        record.get("mode") == "leave_one_memory_out"
+        and record.get("memory_id") == "polluted_refund_lookup_policy_001"
+        and record.get("delta_reward") == -1.0
+        and record.get("attribution_label") == "harmful"
+        for record in replay_records
+    )
+    assert any(
         record.get("event_type") == "utility_update"
         and record.get("memory_id") == "polluted_refund_lookup_policy_001"
         and record.get("outcome") == "harmful"
+        and record.get("credit_source") == "leave_one_memory_out"
+        and record.get("replay_attribution_label") == "harmful"
         for record in update_records
     )

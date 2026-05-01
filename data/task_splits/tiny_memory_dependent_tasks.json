@@ -1,0 +1,26 @@
+[
+  {
+    "task_id": "tiny_memory_order_seed_001",
+    "instruction": "Find the delivery status for order ORD-1001.",
+    "expected_answer_contains": ["delivered"],
+    "initial_state": {},
+    "no_memory_success": true,
+    "no_memory_reward": 1.0
+  },
+  {
+    "task_id": "tiny_memory_order_replay_002",
+    "instruction": "Find the delivery status for the same order from the prior order-status example.",
+    "expected_answer_contains": ["delivered"],
+    "initial_state": {},
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_memory_order_replay_003",
+    "instruction": "Find the delivery status for the same order from the prior order-status example.",
+    "expected_answer_contains": ["delivered"],
+    "initial_state": {},
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  }
+]

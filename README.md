@@ -15,6 +15,7 @@ Current scope:
 9. Run risk-aware gated retrieval over structured candidate memories and log every gate decision.
 10. Bootstrap polluted candidate memories to test negative-transfer detection and gate rejection.
 11. Update used candidate-memory utility online and apply minimal lifecycle transitions to active or quarantined states.
+12. Run leave-one-memory-out replay for gated memories and use replay deltas for higher-confidence utility updates.
 
 ## Environment
 
@@ -57,6 +58,12 @@ Repeated-intent utility update check:
 
 ```powershell
 python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_repeated.yaml
+```
+
+Replay-backed utility update check:
+
+```powershell
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_replay.yaml
 ```
 
 Polluted-memory gate check:
@@ -110,6 +117,7 @@ When a gated memory is actually injected into the agent context, `memory_updates
 
 ```text
 outcome
+credit_source
 baseline_reward
 delta_reward
 utility_before
@@ -118,11 +126,30 @@ lifecycle_before
 lifecycle_after
 positive_evidence
 negative_evidence
+replay_id
+source_run_id
+```
+
+For configs with `memory.replay.enabled=true`, `replay_results.jsonl` records replay attribution with:
+
+```text
+replay_id
+source_run_id
+task_id
+memory_id
+mode
+with_reward
+without_reward
+delta_reward
+with_success
+without_success
+attribution_label
 ```
 
 `metrics.json` also includes `with_memory_fail_no_memory_success`, `negative_transfer_rate`, `harmful_memory_ids`, and gate acceptance/rejection counts.
 For structured candidate-memory runs it additionally reports utility update counts and lifecycle counts:
 `utility_update_count`, `utility_helpful_count`, `utility_harmful_count`, `candidate_memory_count`, `active_memory_count`, and `quarantined_memory_count`.
+Replay-enabled runs additionally report `replay_result_count`, `replay_leave_one_count`, `replay_helpful_count`, `replay_harmful_count`, `replay_neutral_count`, `replay_utility_update_count`, `online_proxy_utility_update_count`, and `utility_credit_sources`.
 
 ## Tests
 
@@ -132,9 +159,9 @@ pytest
 
 ## Next Milestone
 
-The next coding round should add replay-backed verification or connect tau-bench:
+The next coding round should add verification-gated consolidation or connect tau-bench:
 
-1. Add leave-one-memory-out replay for higher-confidence negative-transfer attribution.
-2. Add verification-gated consolidation beyond the current deterministic lifecycle thresholds.
+1. Add support-task replay sets for candidate consolidation beyond single-task leave-one-memory-out.
+2. Add verification-gated consolidation beyond the current replay-backed lifecycle thresholds.
 3. Add repeated-intent and polluted splits with broader task diversity.
 4. Wire the tau-bench adapter to replace the toy environment.

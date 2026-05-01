@@ -10,6 +10,7 @@ from ntmemevo.agents.react_agent import ReActToolAgent
 from ntmemevo.config import load_config
 from ntmemevo.envs.factory import create_env
 from ntmemevo.evaluation.metrics import aggregate_negative_transfer, aggregate_results
+from ntmemevo.evaluation.replay import ReplayConfig, ReplayResult, run_memory_replays
 from ntmemevo.llm.client import create_llm_client
 from ntmemevo.logging.run_logger import RunLogger
 from ntmemevo.logging.trace_logger import TraceLogger
@@ -55,6 +56,8 @@ def run(config_path: str) -> dict[str, Any]:
     utility_config = memory_config.get("utility", {}) or {}
     promote_after_helpful = int(utility_config.get("promote_after_helpful", 2))
     quarantine_after_harmful = int(utility_config.get("quarantine_after_harmful", 1))
+    replay_config = ReplayConfig.from_config(memory_config.get("replay"))
+    replay_results: list[ReplayResult] = []
     if memory_policy == "raw_trace_rag":
         memory_store = RawTraceMemoryStore(
             path=config.output_dir / "memories.jsonl",
@@ -186,17 +189,67 @@ def run(config_path: str) -> dict[str, Any]:
             and isinstance(memory_store, CandidateMemoryStore)
             and result.used_memory_ids
         ):
-            for memory_id in result.used_memory_ids:
-                update = memory_store.update_utility(
-                    memory_id=memory_id,
-                    result=result,
-                    iteration=index,
-                    run_id=run_id,
-                    no_memory_success=no_memory_success_by_task.get(task.task_id, True),
-                    no_memory_reward=no_memory_reward_by_task.get(task.task_id),
-                    promote_after_helpful=promote_after_helpful,
-                    quarantine_after_harmful=quarantine_after_harmful,
+            replay_updates_by_memory_id: dict[str, ReplayResult] = {}
+            if replay_config.enabled:
+                selected_memories = [
+                    memory
+                    for memory in memories
+                    if memory.memory_id in set(result.used_memory_ids)
+                ]
+                current_replay_results = run_memory_replays(
+                    task=task,
+                    agent=agent,
+                    env_factory=lambda: create_env(config.benchmark),
+                    source_run_id=run_id,
+                    selected_memories=selected_memories,
+                    config=replay_config,
                 )
+                replay_results.extend(current_replay_results)
+                for replay_result in current_replay_results:
+                    run_logger.append_jsonl(
+                        "replay_results.jsonl",
+                        replay_result.to_json(),
+                    )
+                    if (
+                        replay_result.mode == "leave_one_memory_out"
+                        and replay_result.memory_id is not None
+                    ):
+                        replay_updates_by_memory_id[replay_result.memory_id] = replay_result
+
+            for memory_id in result.used_memory_ids:
+                replay_result = replay_updates_by_memory_id.get(memory_id)
+                if (
+                    replay_result is not None
+                    and replay_result.with_reward is not None
+                    and replay_result.without_reward is not None
+                    and replay_result.delta_reward is not None
+                ):
+                    update = memory_store.update_utility_from_replay(
+                        memory_id=memory_id,
+                        source_run_id=run_id,
+                        replay_id=replay_result.replay_id,
+                        iteration=index,
+                        with_reward=replay_result.with_reward,
+                        without_reward=replay_result.without_reward,
+                        delta_reward=replay_result.delta_reward,
+                        attribution_label=replay_result.attribution_label,
+                        promote_after_helpful=promote_after_helpful,
+                        quarantine_after_harmful=quarantine_after_harmful,
+                        promote_requires_positive_lcb=(
+                            replay_config.promote_requires_positive_lcb
+                        ),
+                    )
+                else:
+                    update = memory_store.update_utility(
+                        memory_id=memory_id,
+                        result=result,
+                        iteration=index,
+                        run_id=run_id,
+                        no_memory_success=no_memory_success_by_task.get(task.task_id, True),
+                        no_memory_reward=no_memory_reward_by_task.get(task.task_id),
+                        promote_after_helpful=promote_after_helpful,
+                        quarantine_after_harmful=quarantine_after_harmful,
+                    )
                 utility_updates.append(update)
                 record = update.to_json()
                 record.update(
@@ -211,6 +264,18 @@ def run(config_path: str) -> dict[str, Any]:
                         "error_type": result.error_type,
                     }
                 )
+                if replay_result is not None:
+                    record.update(
+                        {
+                            "replay_mode": replay_result.mode,
+                            "replay_attribution_label": replay_result.attribution_label,
+                            "replay_with_reward": replay_result.with_reward,
+                            "replay_without_reward": replay_result.without_reward,
+                            "replay_delta_reward": replay_result.delta_reward,
+                            "replay_with_success": replay_result.with_success,
+                            "replay_without_success": replay_result.without_success,
+                        }
+                    )
                 run_logger.append_jsonl("memory_updates.jsonl", record)
 
         if memory_store is not None:
@@ -278,10 +343,29 @@ def run(config_path: str) -> dict[str, Any]:
     )
     metrics["gate_rejection_reasons"] = dict(sorted(gate_reason_counts.items()))
     utility_outcome_counts = Counter(update.outcome for update in utility_updates)
+    utility_credit_counts = Counter(update.credit_source for update in utility_updates)
     metrics["utility_update_count"] = len(utility_updates)
     metrics["utility_helpful_count"] = utility_outcome_counts.get("helpful", 0)
     metrics["utility_harmful_count"] = utility_outcome_counts.get("harmful", 0)
     metrics["utility_neutral_count"] = utility_outcome_counts.get("neutral", 0)
+    metrics["utility_credit_sources"] = dict(sorted(utility_credit_counts.items()))
+    metrics["online_proxy_utility_update_count"] = utility_credit_counts.get("online_proxy", 0)
+    metrics["replay_utility_update_count"] = utility_credit_counts.get(
+        "leave_one_memory_out",
+        0,
+    )
+    replay_label_counts = Counter(
+        replay_result.attribution_label
+        for replay_result in replay_results
+        if replay_result.mode == "leave_one_memory_out"
+    )
+    metrics["replay_result_count"] = len(replay_results)
+    metrics["replay_leave_one_count"] = sum(
+        1 for replay_result in replay_results if replay_result.mode == "leave_one_memory_out"
+    )
+    metrics["replay_helpful_count"] = replay_label_counts.get("helpful", 0)
+    metrics["replay_harmful_count"] = replay_label_counts.get("harmful", 0)
+    metrics["replay_neutral_count"] = replay_label_counts.get("neutral", 0)
     if isinstance(memory_store, CandidateMemoryStore):
         lifecycle_counts = Counter(memory.lifecycle.status for memory in memory_store.all())
         metrics["candidate_memory_count"] = lifecycle_counts.get("candidate", 0)
