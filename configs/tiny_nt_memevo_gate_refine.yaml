@@ -1,0 +1,79 @@
+experiment:
+  name: tiny_nt_memevo_gate_refine_seed1
+  seed: 1
+  output_dir: runs/tiny_nt_memevo_gate_refine_seed1
+
+benchmark:
+  name: tiny_tools
+  split_file: data/task_splits/tiny_memory_dependent_tasks.json
+  max_tasks: 3
+
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 1
+
+models:
+  actor:
+    provider: mock
+    model: mock-memory-sensitive-agent
+    follow_memory_hints: true
+    temperature: 0.0
+    max_tokens: 512
+
+memory:
+  method: nt_memevo_gate
+  top_k: 1
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  max_claim_chars: 700
+  utility:
+    promote_after_helpful: 2
+    quarantine_after_harmful: 1
+  replay:
+    enabled: true
+    delta_threshold: 0.0
+    max_memories: 1
+    log_context_modes: true
+    promote_requires_positive_lcb: true
+  verification:
+    enabled: true
+    support_split_file: data/task_splits/tiny_mixed_support_verification_tasks.json
+    max_support_tasks: 4
+    min_support_tasks: 4
+    min_support_similarity: 0.0
+    require_intent_match: false
+    require_domain_match: true
+    min_helpful_before_verify: 2
+    disable_immediate_promotion: true
+    delta_threshold: 0.0
+    min_delta_mean: 0.0
+    min_lcb_delta_reward: 0.0
+    max_negative_transfer_rate: 0.0
+    quarantine_on_negative_transfer: true
+    retire_on_verification_failure: false
+    log_support_selection: true
+    budget:
+      max_verifications_per_run: 2
+      max_support_replay_records_per_run: 8
+    refinement:
+      enabled: true
+      min_helpful: 2
+      refined_status: active
+      quarantine_parent: true
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    max_risk: 0.65
+    weight_utility: 0.60
+    reject_negative_evidence: true
+    allowed_statuses: ["candidate", "active"]
+
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true

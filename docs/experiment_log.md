@@ -846,21 +846,400 @@ replay-backed utility update 复验通过。与 `tiny_nt_memevo_gate_repeated_se
 
 第七轮完整复验通过。基础 baseline、candidate schema、保守 gate、online proxy fallback、replay-helpful attribution、safe polluted rejection 和 unsafe polluted replay-harmful attribution 均稳定。当前日志已经能区分 `online_proxy` 与 `leave_one_memory_out` 两类 utility credit source，并能在 `replay_results.jsonl` 中记录 helpful/harmful 的局部反事实证据。
 
+## 第一阶段第八轮完整对照复验摘要
+
+### 日期与环境
+
+2026-05-02，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+### 测试结果
+
+```text
+13 passed in 0.08s
+```
+
+### 对照指标
+
+1. `tiny_nomem_seed1`：`success_rate=1.0`，`avg_prompt_tokens=310.4`，`memory_policy=none`，`memory_size=0`，`negative_transfer_rate=0.0`，`verification_count=0`。
+2. `tiny_raw_trace_rag_seed1`：`success_rate=1.0`，`avg_prompt_tokens=538.6`，`memory_policy=raw_trace_rag`，`memory_size=5`，`memory_top_k=2`，`verification_count=0`。
+3. `tiny_reflexion_seed1`：`success_rate=1.0`，`avg_prompt_tokens=832.2`，`memory_policy=reflexion`，`memory_size=5`，`memory_top_k=2`，`verification_count=0`。
+4. `tiny_nt_memevo_candidate_seed1`：`success_rate=1.0`，`avg_prompt_tokens=310.4`，`memory_policy=nt_memevo_candidate`，`memory_size=5`，`candidate_memory_count=5`，`active_memory_count=0`，`quarantined_memory_count=0`。
+5. `tiny_nt_memevo_gate_seed1`：`success_rate=1.0`，`memory_size=5`，`gate_decision_count=10`，`gate_accepted_count=0`，`gate_rejection_reasons={"precondition_below_threshold": 10}`，`utility_update_count=0`。
+6. `tiny_nt_memevo_gate_repeated_seed1`：`num_tasks=3`，`success_rate=1.0`，`gate_accepted_count=3`，`utility_update_count=3`，`utility_credit_sources={"online_proxy": 3}`，`online_proxy_utility_update_count=3`，`replay_utility_update_count=0`，`active_memory_count=1`。
+7. `tiny_nt_memevo_gate_replay_seed1`：`num_tasks=3`，`success_rate=1.0`，`gate_accepted_count=2`，`replay_result_count=6`，`replay_leave_one_count=2`，`replay_helpful_count=2`，`utility_credit_sources={"leave_one_memory_out": 2}`，`support_replay_count=0`，`active_memory_count=1`。
+8. `tiny_nt_memevo_gate_verify_seed1`：`num_tasks=3`，`success_rate=1.0`，`gate_accepted_count=2`，`replay_result_count=8`，`replay_leave_one_count=2`，`support_replay_count=2`，`support_replay_helpful_count=2`，`verification_count=1`，`verification_passed_count=1`，`verification_failed_count=0`，`active_memory_count=1`。
+9. `tiny_nt_memevo_gate_polluted_seed1`：`success_rate=1.0`，`memory_size=6`，`gate_decision_count=15`，`gate_accepted_count=0`，`gate_rejection_reasons={"negative_evidence_present": 5, "precondition_below_threshold": 10}`，`negative_transfer_rate=0.0`，`verification_count=0`。
+10. `tiny_nt_memevo_gate_unsafe_polluted_seed1`：`num_tasks=1`，`success_rate=0.0`，`negative_transfer_rate=1.0`，`harmful_memory_ids=["polluted_refund_lookup_policy_001"]`，`replay_leave_one_count=1`，`replay_harmful_count=1`，`replay_utility_update_count=1`，`quarantined_memory_count=1`。
+
+### 结论
+
+第八轮完整复验通过。基础 baseline、candidate schema、保守 gate、online proxy fallback、source-task replay、support-set verification、safe polluted rejection 和 unsafe polluted harmful attribution 均稳定。新增 `tiny_nt_memevo_gate_verify_seed1` 证明 candidate memory 可以先通过 source-task replay 累计 helpful evidence，但不即时 promotion；随后由 support-set verification 统一决定 `candidate -> active`。
+
+关键日志检查也通过：
+
+1. `memory_updates.jsonl` 中存在 1 条 `event_type=verification_update`。
+2. `verification_update` 显示 `support_task_ids=["tiny_support_order_001","tiny_support_order_002"]`、`support_delta_mean=1.0`、`support_lcb_delta_reward=0.292893`、`support_negative_transfer_rate=0.0`。
+3. `verification_update.lifecycle_before.status=candidate`，`lifecycle_after.status=active`。
+4. `replay_results.jsonl` 中两条 `replay_scope=support_task_replay` 均为 `delta_reward=1.0`、`cost_adjusted_delta_reward=1.0`、`attribution_label=helpful`。
+5. `candidate_memories.jsonl` 中 `cand_000001_tiny_memory_order_seed_001` 最终为 `active`，且 positive evidence 包含两个 support replay ids。
+
 ## 当前下一轮方向
 
-第一阶段第八轮建议优先实现 `support-set replay + verification-gated consolidation`。第七轮已经跑通单任务 leave-one-memory-out 归因：safe replay 中 seed memory 的 `delta_reward=1.0` 并进入 `active`，unsafe polluted replay 中污染记忆的 `delta_reward=-1.0` 并进入 `quarantined`。下一轮应把这种“当前任务局部反事实”升级为“相似支持任务集合验证”，并把 candidate consolidation 从主循环即时阈值迁移到独立验证队列。
+第一阶段第九轮建议优先扩展 support pool 与 matched replay，并开始实现 memory scope refinement / merge-split。第八轮已经证明 support-set verification 能够独立决定 `candidate -> active`，但当前 support pool 仍是 tiny 人工构造的 order-status 正向链路，尚不能覆盖“同一记忆在部分任务有益、部分任务有害”的核心负迁移场景。
 
-第八轮建议范围：
+第九轮建议范围：
 
-1. 新增 support task selector：根据 `scope.intent`、domain、preconditions、tool names 和 lexical similarity 从 tiny support pool 中选择相似任务。
-2. 新增 `MemoryVerifier` 或 consolidation runner：对 candidate memory 在 support task set 上运行 `with memory` / `without memory` replay。
-3. 新增 support task fixtures，至少覆盖 `order_status`、`refund_eligibility` 和 `exchange_eligibility`，避免第七轮只验证 order-status 单一路径。
-4. 将 `candidate -> active` 从主循环即时更新迁移为 verification-gated consolidation，记录 `verification_passed`、`support_delta_mean`、`support_negative_transfer_rate` 和 `support_lcb_delta_reward`。
-5. 扩展 `replay_results.jsonl`，区分 `source_task_replay` 与 `support_task_replay`。
-6. 增加 replay cost metrics：`replay_prompt_tokens`、`replay_completion_tokens`、`replay_tool_calls`、`delta_prompt_tokens`、`delta_tool_calls` 和 cost-adjusted delta。
-7. 新增 metrics：`verification_count`、`verification_passed_count`、`verification_failed_count`、`support_replay_count`、`support_replay_helpful_count` 和 `support_replay_harmful_count`。
-8. 保持第七轮所有配置不回归：`repeated` 继续覆盖 online proxy fallback，`replay` 覆盖 helpful attribution，`polluted` 覆盖 safe rejection，`unsafe_polluted` 覆盖 harmful attribution 和 quarantine。
-9. consolidation 日志稳定后再迁移 tau-bench retail。
+1. 扩充 tiny support/task split，覆盖 `refund_eligibility`、`exchange_eligibility`、`inventory_check` 和 `policy_lookup` 的 memory-dependent 正例、neutral 例子和 harmful support 例子。
+2. 新增 matched replay selector 日志，记录每个 support task 的 `support_match_score`、`intent_score`、`domain_score`、`tool_score` 和 `lexical_score`，使 support 选择过程可审计。
+3. 实现 scope refinement：当 support replay 的 harmful/neutral evidence 集中在某些 intent、tool 或 precondition 上时，生成更窄 scope 的 refined memory，而不是只 quarantine 原 memory。
+4. 新增 `memory_refine` / `memory_split` / `memory_merge` 事件，记录 parent memory id、child memory id、scope 变化、证据迁移和触发原因。
+5. 增加 replay budget controls，限制每轮 verification 的最大 memory 数、最大 support task 数和最大 replay 执行数，并将预算消耗写入 metrics。
+6. 将 replay 成本统计升级为 unique execution 口径，避免 context mode 与 comparison record 重复计数。
+7. 保持第八轮全部配置不回归，尤其是 `tiny_nt_memevo_gate_verify_seed1` 的 `verification_passed_count=1` 和 `tiny_nt_memevo_gate_unsafe_polluted_seed1` 的 `negative_transfer_rate=1.0`。
+8. 若 support/refinement 日志稳定，可并行开始 tau-bench retail adapter 的最小接入；否则继续先稳定 tiny 上的负迁移拆分链路。
+
+## tiny_nt_memevo_gate_verify_seed1
+
+### 实验名称
+
+`tiny_nt_memevo_gate_verify_seed1`
+
+### 日期与环境
+
+2026-05-02，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_verify.yaml
+cat runs/tiny_nt_memevo_gate_verify_seed1/metrics.json
+grep '"event_type": "verification_update"' runs/tiny_nt_memevo_gate_verify_seed1/memory_updates.jsonl
+grep '"replay_scope": "support_task_replay"' runs/tiny_nt_memevo_gate_verify_seed1/replay_results.jsonl
+head -n 3 runs/tiny_nt_memevo_gate_verify_seed1/candidate_memories.jsonl
+```
+
+### 配置文件
+
+`configs/tiny_nt_memevo_gate_verify.yaml`
+
+关键参数：`benchmark.split_file=data/task_splits/tiny_memory_dependent_tasks.json`，`memory.method=nt_memevo_gate`，`memory.top_k=1`，`memory.replay.enabled=true`，`memory.verification.enabled=true`，`memory.verification.support_split_file=data/task_splits/tiny_support_verification_tasks.json`，`memory.verification.disable_immediate_promotion=true`，`models.actor.follow_memory_hints=true`。
+
+### 输出目录
+
+`runs/tiny_nt_memevo_gate_verify_seed1/`
+
+### 结果
+
+`pytest` 结果：
+
+```text
+13 passed in 0.08s
+```
+
+`tiny_nt_memevo_gate_verify_seed1/metrics.json`：
+
+```json
+{
+  "num_tasks": 3,
+  "success_rate": 1.0,
+  "avg_reward": 1.0,
+  "avg_steps": 2.0,
+  "avg_prompt_tokens": 514.0,
+  "avg_completion_tokens": 71.0,
+  "avg_tool_calls": 1.0,
+  "with_memory_fail_no_memory_success": 0,
+  "memory_attributed_failures": 0,
+  "negative_transfer_rate": 0.0,
+  "harmful_memory_ids": [],
+  "negative_transfer_failure_examples": [],
+  "memory_policy": "nt_memevo_gate",
+  "memory_size": 3,
+  "memory_top_k": 1,
+  "gate_decision_count": 3,
+  "gate_accepted_count": 2,
+  "gate_rejected_count": 1,
+  "gate_rejection_reasons": {
+    "accepted": 2,
+    "top_k_pruned": 1
+  },
+  "utility_update_count": 2,
+  "utility_helpful_count": 2,
+  "utility_harmful_count": 0,
+  "utility_neutral_count": 0,
+  "utility_credit_sources": {
+    "leave_one_memory_out": 2
+  },
+  "online_proxy_utility_update_count": 0,
+  "replay_utility_update_count": 2,
+  "replay_result_count": 8,
+  "replay_leave_one_count": 2,
+  "replay_helpful_count": 2,
+  "replay_harmful_count": 0,
+  "replay_neutral_count": 0,
+  "support_replay_count": 2,
+  "support_replay_helpful_count": 2,
+  "support_replay_harmful_count": 0,
+  "support_replay_neutral_count": 0,
+  "verification_count": 1,
+  "verification_passed_count": 1,
+  "verification_failed_count": 0,
+  "verification_update_count": 1,
+  "replay_prompt_tokens": 5876,
+  "replay_completion_tokens": 800,
+  "replay_tool_calls": 8,
+  "replay_delta_prompt_tokens": 2764,
+  "replay_delta_tool_calls": 6,
+  "support_replay_prompt_tokens": 1540,
+  "support_replay_completion_tokens": 218,
+  "support_replay_tool_calls": 2,
+  "candidate_memory_count": 2,
+  "active_memory_count": 1,
+  "quarantined_memory_count": 0,
+  "retired_memory_count": 0
+}
+```
+
+`memory_updates.jsonl` 抽查结果：
+
+1. 存在 1 条 `event_type=verification_update`。
+2. 该 verification 对应 `memory_id=cand_000001_tiny_memory_order_seed_001`。
+3. `verification_passed=true`，`failure_reason=null`。
+4. `support_task_ids=["tiny_support_order_001","tiny_support_order_002"]`。
+5. `support_delta_mean=1.0`，`support_lcb_delta_reward=0.292893`，`support_negative_transfer_rate=0.0`。
+6. `support_replay_count=2`，`support_replay_helpful_count=2`，`support_replay_harmful_count=0`。
+7. `lifecycle_before.status=candidate`，`lifecycle_after.status=active`。
+8. `positive_evidence` 在 source-task evidence 之外追加了两个 support replay id。
+
+`replay_results.jsonl` 抽查结果：
+
+1. 共 8 条 replay 记录，其中 6 条来自 source-task replay，2 条来自 support-task replay。
+2. 两条 support replay 的 `replay_scope=support_task_replay`，`mode=support_task_replay`。
+3. 两条 support replay 分别对应 `tiny_support_order_001` 和 `tiny_support_order_002`。
+4. 两条 support replay 均为 `with_reward=1.0`、`without_reward=0.0`、`delta_reward=1.0`、`cost_adjusted_delta_reward=1.0`、`with_success=true`、`without_success=false`、`attribution_label=helpful`。
+5. Support replay 成本字段完整：两条记录均包含 `with_prompt_tokens`、`without_prompt_tokens`、`delta_prompt_tokens`、`with_completion_tokens`、`without_completion_tokens`、`delta_completion_tokens`、`with_tool_calls`、`without_tool_calls` 和 `delta_tool_calls`。
+
+`candidate_memories.jsonl` 抽查结果：
+
+1. 第一条 seed memory `cand_000001_tiny_memory_order_seed_001` 最终为 `lifecycle.status=active`。
+2. 该 memory 最终 `alpha=3.0`、`beta=1.0`、`mean_delta_reward=1.0`、`lcb_delta_reward=0.292893`、`num_used=2`、`num_helpful=2`、`num_harmful=0`。
+3. 该 memory 的 `positive_evidence` 包含 seed run、两个 source replay-dependent run 和两个 support replay ids。
+4. 第二、三条 replay-dependent candidate 仍保持 `candidate`，尚未被后续任务验证或 promotion。
+
+### 现象与问题
+
+第八轮 support-set verification 复验通过。与 `tiny_nt_memevo_gate_replay_seed1` 不同，本配置使用 `memory.verification.disable_immediate_promotion=true`，因此 seed memory 在两次 source-task leave-one-memory-out replay helpful 后先保持 `candidate`；随后 support-set verification 在两个相似 support tasks 上均得到 `delta_reward=1.0`，最终由 `verification_update` 将其提升为 `active`。
+
+该实验说明第一阶段已经具备三层递进链路：
+
+1. `online_proxy`：快速 outcome update，用于 repeated-intent fallback。
+2. `leave_one_memory_out`：当前任务局部反事实归因，用于 source-task helpful/harmful 判断。
+3. `support_task_replay`：相似支持任务集合验证，用于更稳健的 candidate consolidation。
+
+当前问题是 support pool 仍是 tiny 人工构造，且本实验只验证了 order-status 正向链路。后续需要覆盖 refund、exchange、inventory、policy 等更多 intent，并加入 neutral/harmful support 例子，用于验证 scope refinement 和 memory split。
+
+### 下一步
+
+第九轮应扩展 support pool 与 matched replay，并开始实现 memory scope refinement / merge-split。重点是让 support replay 能发现“某条记忆在部分 support tasks helpful、在另一部分 support tasks neutral/harmful”的情况，并把这种证据转化为更窄 scope 的 refined memory，而不是只做 active/quarantined 二分。
+
+## tiny_nt_memevo_gate_refine_seed1
+
+### 实验名称
+
+`tiny_nt_memevo_gate_refine_seed1`
+
+### 日期与环境
+
+2026-05-02，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_refine.yaml
+cat runs/tiny_nt_memevo_gate_refine_seed1/metrics.json
+grep '"event_type": "support_selection"' runs/tiny_nt_memevo_gate_refine_seed1/memory_updates.jsonl
+grep '"event_type": "memory_refine"' runs/tiny_nt_memevo_gate_refine_seed1/memory_updates.jsonl
+```
+
+### 配置文件
+
+`configs/tiny_nt_memevo_gate_refine.yaml`
+
+关键参数：`benchmark.split_file=data/task_splits/tiny_memory_dependent_tasks.json`，`memory.verification.support_split_file=data/task_splits/tiny_mixed_support_verification_tasks.json`，`memory.verification.require_intent_match=false`，`memory.verification.max_support_tasks=4`，`memory.verification.min_support_tasks=4`，`memory.verification.refinement.enabled=true`，`memory.verification.budget.max_verifications_per_run=2`，`models.actor.follow_memory_hints=true`。
+
+### 输出目录
+
+`runs/tiny_nt_memevo_gate_refine_seed1/`
+
+### 结果
+
+`pytest` 结果：
+
+```text
+15 passed in 0.07s
+```
+
+`tiny_nt_memevo_gate_refine_seed1/metrics.json`：
+
+```json
+{
+  "num_tasks": 3,
+  "success_rate": 1.0,
+  "avg_reward": 1.0,
+  "avg_steps": 2.0,
+  "avg_prompt_tokens": 514.0,
+  "avg_completion_tokens": 71.0,
+  "avg_tool_calls": 1.0,
+  "with_memory_fail_no_memory_success": 0,
+  "memory_attributed_failures": 0,
+  "negative_transfer_rate": 0.0,
+  "harmful_memory_ids": [],
+  "negative_transfer_failure_examples": [],
+  "memory_policy": "nt_memevo_gate",
+  "memory_size": 4,
+  "memory_top_k": 1,
+  "gate_decision_count": 3,
+  "gate_accepted_count": 2,
+  "gate_rejected_count": 1,
+  "gate_rejection_reasons": {
+    "accepted": 2,
+    "top_k_pruned": 1
+  },
+  "utility_update_count": 2,
+  "utility_helpful_count": 2,
+  "utility_harmful_count": 0,
+  "utility_neutral_count": 0,
+  "utility_credit_sources": {
+    "leave_one_memory_out": 2
+  },
+  "online_proxy_utility_update_count": 0,
+  "replay_utility_update_count": 2,
+  "replay_result_count": 10,
+  "replay_leave_one_count": 2,
+  "replay_helpful_count": 2,
+  "replay_harmful_count": 0,
+  "replay_neutral_count": 0,
+  "support_replay_count": 4,
+  "support_replay_helpful_count": 2,
+  "support_replay_harmful_count": 2,
+  "support_replay_neutral_count": 0,
+  "verification_count": 1,
+  "verification_passed_count": 0,
+  "verification_failed_count": 1,
+  "verification_update_count": 1,
+  "support_selection_count": 4,
+  "memory_refinement_count": 1,
+  "memory_split_count": 1,
+  "verification_budget_skipped_count": 0,
+  "verification_budget_skip_reasons": {},
+  "verification_budget_max_verifications": 2,
+  "verification_budget_max_support_replay_records": 8,
+  "verification_budget_verifications_used": 1,
+  "verification_budget_support_replay_records_used": 4,
+  "replay_record_prompt_tokens": 7757,
+  "replay_record_completion_tokens": 1108,
+  "replay_record_tool_calls": 12,
+  "replay_unique_execution_count": 12,
+  "replay_prompt_tokens": 4971,
+  "replay_completion_tokens": 744,
+  "replay_tool_calls": 8,
+  "replay_delta_prompt_tokens": 3343,
+  "replay_delta_tool_calls": 6,
+  "support_replay_record_prompt_tokens": 3421,
+  "support_replay_record_completion_tokens": 526,
+  "support_replay_record_tool_calls": 6,
+  "support_replay_unique_execution_count": 8,
+  "support_replay_prompt_tokens": 3421,
+  "support_replay_completion_tokens": 526,
+  "support_replay_tool_calls": 6,
+  "candidate_memory_count": 2,
+  "active_memory_count": 1,
+  "quarantined_memory_count": 1,
+  "retired_memory_count": 0
+}
+```
+
+`support_selection` 抽查结果：
+
+1. 共 4 条 `event_type=support_selection`。
+2. rank 1 和 rank 2 为 `order_status` support：`support_match_score=0.954119` / `0.929079`，`attribution_label=helpful`，`delta_reward=1.0`，`with_success=true`，`without_success=false`。
+3. rank 3 为 `refund_eligibility` support：`support_match_score=0.356605`，`attribution_label=harmful`，`delta_reward=-1.0`，`with_success=false`，`without_success=true`。
+4. rank 4 为 `exchange_eligibility` support：`support_match_score=0.162116`，`attribution_label=harmful`，`delta_reward=-1.0`，`with_success=false`，`without_success=true`。
+5. 用户复验输出暴露一个字段命名问题：`support_selection` 顶层 `task_id` 表示 source task，support task id 没有独立字段；编码侧已补充 `source_task_id` 和 `support_task_id`，并重新运行 `PYTHONPATH=src python -m pytest -q`，结果为 `15 passed in 0.12s`。
+
+`memory_refine` 抽查结果：
+
+1. 存在 1 条 `event_type=memory_refine`。
+2. `parent_memory_id=cand_000001_tiny_memory_order_seed_001`。
+3. `child_memory_id=cand_000001_tiny_memory_order_seed_001__refined_001`。
+4. `trigger_reason=mixed_support_harmful`。
+5. `helpful_support_task_ids=["tiny_mixed_support_order_001","tiny_mixed_support_order_002"]`。
+6. `harmful_support_task_ids=["tiny_mixed_support_refund_001","tiny_mixed_support_exchange_001"]`。
+7. `child_lifecycle.status=active`。
+8. `child_utility.mean_delta_reward=1.0`，`child_utility.lcb_delta_reward=0.292893`，`child_utility.num_helpful=2`，`child_utility.num_harmful=0`。
+
+`replay_results.jsonl` 抽查结果：
+
+1. 共 4 条 `replay_scope=support_task_replay`。
+2. 两条 order support replay 为 helpful：`with_reward=1.0`、`without_reward=0.0`、`delta_reward=1.0`、`cost_adjusted_delta_reward=1.0`。
+3. refund 和 exchange support replay 为 harmful：`with_reward=0.0`、`without_reward=1.0`、`delta_reward=-1.0`、`cost_adjusted_delta_reward=-1.0`。
+4. support replay 记录包含 `with_execution_id` 和 `without_execution_id`，用于 unique-execution 成本统计。
+
+`candidate_memories.jsonl` 抽查结果：
+
+1. parent memory `cand_000001_tiny_memory_order_seed_001` 最终为 `lifecycle.status=quarantined`，包含两个 harmful support replay id 作为 `negative_evidence`。
+2. refined child memory `cand_000001_tiny_memory_order_seed_001__refined_001` 最终为 `lifecycle.status=active`。
+3. refined child memory 的 `scope.intent=order_status`，`tool_names=["get_order_status"]`，preconditions 中包含 parent id、verification id 和 helpful support task ids。
+4. refined child memory 的 `utility.alpha=3.0`、`beta=1.0`、`mean_delta_reward=1.0`、`lcb_delta_reward=0.292893`、`num_used=2`、`num_helpful=2`、`num_harmful=0`。
+
+第九轮完整对照结果：
+
+1. `tiny_nomem_seed1`：`success_rate=1.0`，`avg_prompt_tokens=310.4`，`memory_policy=none`，`memory_size=0`，`negative_transfer_rate=0.0`。
+2. `tiny_raw_trace_rag_seed1`：`success_rate=1.0`，`avg_prompt_tokens=538.6`，`memory_policy=raw_trace_rag`，`memory_size=5`，`memory_top_k=2`。
+3. `tiny_reflexion_seed1`：`success_rate=1.0`，`avg_prompt_tokens=832.2`，`memory_policy=reflexion`，`memory_size=5`，`memory_top_k=2`。
+4. `tiny_nt_memevo_candidate_seed1`：`success_rate=1.0`，`memory_size=5`，`candidate_memory_count=5`，`active_memory_count=0`，`quarantined_memory_count=0`。
+5. `tiny_nt_memevo_gate_seed1`：`success_rate=1.0`，`gate_decision_count=10`，`gate_accepted_count=0`，`gate_rejection_reasons={"precondition_below_threshold": 10}`。
+6. `tiny_nt_memevo_gate_repeated_seed1`：`num_tasks=3`，`gate_accepted_count=3`，`utility_credit_sources={"online_proxy": 3}`，`active_memory_count=1`。
+7. `tiny_nt_memevo_gate_replay_seed1`：`num_tasks=3`，`replay_result_count=6`，`replay_leave_one_count=2`，`replay_helpful_count=2`，`active_memory_count=1`，`replay_prompt_tokens=1550`，`replay_record_prompt_tokens=4336`。
+8. `tiny_nt_memevo_gate_verify_seed1`：`num_tasks=3`，`support_replay_count=2`，`support_replay_helpful_count=2`，`verification_passed_count=1`，`active_memory_count=1`，`replay_prompt_tokens=3090`，`replay_record_prompt_tokens=5876`。
+9. `tiny_nt_memevo_gate_refine_seed1`：`num_tasks=3`，`support_replay_count=4`，`support_replay_helpful_count=2`，`support_replay_harmful_count=2`，`verification_passed_count=0`，`memory_refinement_count=1`，`memory_split_count=1`，`active_memory_count=1`，`quarantined_memory_count=1`。
+10. `tiny_nt_memevo_gate_polluted_seed1`：`success_rate=1.0`，`gate_rejected_count=15`，`gate_rejection_reasons={"negative_evidence_present": 5, "precondition_below_threshold": 10}`，`negative_transfer_rate=0.0`。
+11. `tiny_nt_memevo_gate_unsafe_polluted_seed1`：`num_tasks=1`，`success_rate=0.0`，`negative_transfer_rate=1.0`，`harmful_memory_ids=["polluted_refund_lookup_policy_001"]`，`replay_harmful_count=1`，`quarantined_memory_count=1`。
+
+### 现象与问题
+
+第九轮复验通过。`tiny_nt_memevo_gate_refine_seed1` 稳定触发 mixed-support 场景：同一条 order-status seed memory 在 order support tasks 上是 helpful，在 refund/exchange support tasks 上是 harmful，因此 support-set verification 不通过，并生成 refined child memory。该结果验证了第九轮的核心目标：当 support evidence 显示记忆只在部分范围内有益时，系统可以保留有益子范围，而不是只删除或保留原始记忆。
+
+Unique-execution 成本统计按预期生效。`tiny_nt_memevo_gate_refine_seed1` 中 `replay_record_prompt_tokens=7757`，而 unique 口径 `replay_prompt_tokens=4971`，说明 context / comparison / leave-one 记录复用同一 replay execution 时不会重复计入主成本口径。`tiny_nt_memevo_gate_replay_seed1` 和 `tiny_nt_memevo_gate_verify_seed1` 也表现出 record-level 与 unique-execution 口径的差异。
+
+当前仍是 tiny 人工 mixed-support fixture；它证明日志、归因和 lifecycle 机制可用，但还不能证明真实 benchmark 上的 memory split 效果。
+
+### 下一步
+
+第十轮建议优先接入 tau-bench retail 最小 adapter。第一阶段前九轮已经在 tiny 环境中跑通 candidate schema、risk gate、online utility、leave-one-memory-out replay、support-set verification、mixed-support scope refinement 和 unique-execution 成本统计；继续扩 tiny fixture 的边际收益下降，下一步应验证真实工具任务上的 task loader、tool wrapper、evaluator 和统一日志协议。
+
+第十轮应保持第九轮全部 tiny 配置不回归，尤其是 `tiny_nt_memevo_gate_refine_seed1` 的 `memory_refinement_count=1` 和 `tiny_nt_memevo_gate_unsafe_polluted_seed1` 的 `negative_transfer_rate=1.0`。
+
+## 第一阶段第十轮方向
+
+优先方向：接入 tau-bench retail 的最小 adapter，并把现有日志协议迁移到真实工具任务。
+
+理由：第九轮已经在 tiny 环境中验证 mixed-support scope refinement、support selection 审计、verification budget 和 unique-execution replay cost。当前 tiny fixture 的日志链路已经足够稳定，继续扩人工场景容易过拟合；下一步应让真实 benchmark 暴露 task loading、tool API、policy evaluation、state transition 和 replay cost 的真实问题。
+
+第十轮建议范围：
+
+1. 新增 tau-bench retail adapter，支持从本地数据目录或配置路径加载少量 retail tasks。
+2. 把 tau-bench task 转换为项目内 `Task`，保留 domain、intent、tool_names、policy metadata 和 no-memory baseline 估计字段。
+3. 封装 retail tool API wrapper，先支持极小 smoke 所需工具，保证 ReAct agent 能通过统一 `AgentEnv.call_tool()` 调用。
+4. 接入 evaluator，把 tau-bench 的终态评估映射为 `success`、`reward` 和 `error_type`。
+5. 新增 `configs/tau_retail_nomem.yaml` 或更新现有配置，使 `max_tasks=1` 的 no-memory smoke 可生成完整 `tasks.jsonl`、`runs.jsonl`、`trace_events.jsonl` 和 `metrics.json`。
+6. 外部 tau-bench 依赖或数据不存在时，应给出明确错误信息和安装路径说明；tiny 测试不应依赖 tau-bench 安装。
+7. 保持第九轮 tiny 全部配置不回归：特别是 `tiny_nt_memevo_gate_refine_seed1` 的 `memory_refinement_count=1`、`support_replay_harmful_count=2`，以及 unsafe polluted 的 `negative_transfer_rate=1.0`。
 
 ## 实验记录模板
 

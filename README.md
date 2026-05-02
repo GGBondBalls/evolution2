@@ -16,6 +16,8 @@ Current scope:
 10. Bootstrap polluted candidate memories to test negative-transfer detection and gate rejection.
 11. Update used candidate-memory utility online and apply minimal lifecycle transitions to active or quarantined states.
 12. Run leave-one-memory-out replay for gated memories and use replay deltas for higher-confidence utility updates.
+13. Run support-set replay and verification-gated consolidation before promoting candidates to active memory.
+14. Record support selection details, replay budget usage, and scope-refinement events when support evidence is mixed.
 
 ## Environment
 
@@ -64,6 +66,18 @@ Replay-backed utility update check:
 
 ```powershell
 python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_replay.yaml
+```
+
+Support-set verification and consolidation check:
+
+```powershell
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_verify.yaml
+```
+
+Mixed-support refinement and budget check:
+
+```powershell
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_refine.yaml
 ```
 
 Polluted-memory gate check:
@@ -138,18 +152,82 @@ source_run_id
 task_id
 memory_id
 mode
+replay_scope
 with_reward
 without_reward
 delta_reward
+cost_adjusted_delta_reward
 with_success
 without_success
 attribution_label
+delta_prompt_tokens
+delta_tool_calls
+```
+
+For configs with `memory.verification.enabled=true`, support-set replay records use
+`replay_scope=support_task_replay` and `mode=support_task_replay`. The corresponding
+`memory_updates.jsonl` entries use `event_type=verification_update` and record:
+
+```text
+verification_id
+verification_passed
+failure_reason
+support_task_ids
+support_delta_mean
+support_lcb_delta_reward
+support_negative_transfer_rate
+lifecycle_before
+lifecycle_after
+```
+
+When `memory.verification.log_support_selection=true`, `memory_updates.jsonl` also includes
+`event_type=support_selection` records with:
+
+```text
+task_intent
+source_task_id
+support_task_id
+task_domain
+task_tool_names
+support_match_score
+intent_score
+domain_score
+tool_score
+lexical_score
+selected_rank
+replay_id
+attribution_label
+delta_reward
+cost_adjusted_delta_reward
+with_success
+without_success
+```
+
+When `memory.verification.refinement.enabled=true` and mixed support evidence is detected,
+`memory_updates.jsonl` includes `event_type=memory_refine` records with:
+
+```text
+parent_memory_id
+child_memory_id
+trigger_reason
+parent_scope_before
+child_scope
+parent_lifecycle_before
+parent_lifecycle_after
+child_lifecycle
+child_utility
+helpful_support_task_ids
+harmful_support_task_ids
+neutral_support_task_ids
+support_match_details
 ```
 
 `metrics.json` also includes `with_memory_fail_no_memory_success`, `negative_transfer_rate`, `harmful_memory_ids`, and gate acceptance/rejection counts.
 For structured candidate-memory runs it additionally reports utility update counts and lifecycle counts:
 `utility_update_count`, `utility_helpful_count`, `utility_harmful_count`, `candidate_memory_count`, `active_memory_count`, and `quarantined_memory_count`.
 Replay-enabled runs additionally report `replay_result_count`, `replay_leave_one_count`, `replay_helpful_count`, `replay_harmful_count`, `replay_neutral_count`, `replay_utility_update_count`, `online_proxy_utility_update_count`, and `utility_credit_sources`.
+Verification-enabled runs additionally report `verification_count`, `verification_passed_count`, `verification_failed_count`, `support_replay_count`, `support_replay_helpful_count`, `support_replay_harmful_count`, `support_replay_neutral_count`, and replay cost counters.
+Support-refinement runs additionally report `support_selection_count`, `memory_refinement_count`, `memory_split_count`, verification budget counters, and both record-level and unique-execution replay cost counters.
 
 ## Tests
 
@@ -159,9 +237,9 @@ pytest
 
 ## Next Milestone
 
-The next coding round should add verification-gated consolidation or connect tau-bench:
+The next coding round should broaden verification coverage or connect tau-bench:
 
-1. Add support-task replay sets for candidate consolidation beyond single-task leave-one-memory-out.
-2. Add verification-gated consolidation beyond the current replay-backed lifecycle thresholds.
-3. Add repeated-intent and polluted splits with broader task diversity.
+1. Add broader support pools and matched replay for refund, exchange, inventory, and policy memories.
+2. Add memory merge/split logic when support evidence shows domain- or intent-specific negative transfer.
+3. Add replay budget controls and exact unique-execution cost accounting.
 4. Wire the tau-bench adapter to replace the toy environment.

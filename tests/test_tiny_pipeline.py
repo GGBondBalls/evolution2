@@ -700,6 +700,522 @@ logging:
     )
 
 
+def test_nt_memevo_gate_support_verification_promotes_active_memory(tmp_path: Path) -> None:
+    config_path = tmp_path / "config_nt_gate_verify.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate_verify"
+    split_file = Path("data/task_splits/tiny_memory_dependent_tasks.json").resolve()
+    support_split_file = Path("data/task_splits/tiny_support_verification_tasks.json").resolve()
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_verify_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 1
+models:
+  actor:
+    provider: mock
+    model: mock-memory-sensitive-agent
+    follow_memory_hints: true
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 1
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  utility:
+    promote_after_helpful: 2
+    quarantine_after_harmful: 1
+  replay:
+    enabled: true
+    delta_threshold: 0.0
+    max_memories: 1
+    log_context_modes: true
+    promote_requires_positive_lcb: true
+  verification:
+    enabled: true
+    support_split_file: {support_split_file.as_posix()}
+    max_support_tasks: 2
+    min_support_tasks: 2
+    min_support_similarity: 0.10
+    require_intent_match: true
+    require_domain_match: true
+    min_helpful_before_verify: 2
+    disable_immediate_promotion: true
+    delta_threshold: 0.0
+    min_delta_mean: 0.0
+    min_lcb_delta_reward: 0.0
+    max_negative_transfer_rate: 0.0
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    weight_utility: 0.60
+    reject_negative_evidence: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == 1.0
+    assert metrics["replay_leave_one_count"] == 2
+    assert metrics["support_replay_count"] == 2
+    assert metrics["support_replay_helpful_count"] == 2
+    assert metrics["support_replay_harmful_count"] == 0
+    assert metrics["verification_count"] == 1
+    assert metrics["verification_passed_count"] == 1
+    assert metrics["verification_failed_count"] == 0
+    assert metrics["active_memory_count"] == 1
+
+    candidate_records = [
+        json.loads(line)
+        for line in (output_dir / "candidate_memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    replay_records = [
+        json.loads(line)
+        for line in (output_dir / "replay_results.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    first_memory = next(
+        record
+        for record in candidate_records
+        if record["memory_id"] == "cand_000001_tiny_memory_order_seed_001"
+    )
+    support_replays = [
+        record for record in replay_records if record["replay_scope"] == "support_task_replay"
+    ]
+
+    assert first_memory["lifecycle"]["status"] == "active"
+    assert "tiny_support_order_001" in {record["task_id"] for record in support_replays}
+    assert "tiny_support_order_002" in {record["task_id"] for record in support_replays}
+    assert all(record["mode"] == "support_task_replay" for record in support_replays)
+    assert all(record["delta_reward"] == 1.0 for record in support_replays)
+    assert all(record["cost_adjusted_delta_reward"] == 1.0 for record in support_replays)
+    assert all(
+        not (
+            record.get("event_type") == "utility_update"
+            and record.get("lifecycle_after", {}).get("status") == "active"
+        )
+        for record in update_records
+    )
+    assert any(
+        record.get("event_type") == "verification_update"
+        and record.get("verification_passed") is True
+        and record.get("support_delta_mean") == 1.0
+        and record.get("support_lcb_delta_reward") > 0.0
+        and record.get("lifecycle_before", {}).get("status") == "candidate"
+        and record.get("lifecycle_after", {}).get("status") == "active"
+        for record in update_records
+    )
+
+
+def test_support_verification_failure_keeps_candidate_when_support_delta_is_neutral(
+    tmp_path: Path,
+) -> None:
+    support_split_file = tmp_path / "neutral_support_tasks.json"
+    support_split_file.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "tiny_support_order_direct_001",
+                    "instruction": "Find the delivery status for order ORD-1001.",
+                    "expected_answer_contains": ["delivered"],
+                    "domain": "retail",
+                    "intent": "order_status",
+                    "tool_names": ["get_order_status"],
+                },
+                {
+                    "task_id": "tiny_support_order_direct_002",
+                    "instruction": "Report the current delivery status for order ORD-1001.",
+                    "expected_answer_contains": ["delivered"],
+                    "domain": "retail",
+                    "intent": "order_status",
+                    "tool_names": ["get_order_status"],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config_nt_gate_verify_neutral.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate_verify_neutral"
+    split_file = Path("data/task_splits/tiny_memory_dependent_tasks.json").resolve()
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_verify_neutral_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 1
+models:
+  actor:
+    provider: mock
+    model: mock-memory-sensitive-agent
+    follow_memory_hints: true
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 1
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  utility:
+    promote_after_helpful: 2
+    quarantine_after_harmful: 1
+  replay:
+    enabled: true
+    delta_threshold: 0.0
+    max_memories: 1
+    log_context_modes: true
+    promote_requires_positive_lcb: true
+  verification:
+    enabled: true
+    support_split_file: {support_split_file.as_posix()}
+    max_support_tasks: 2
+    min_support_tasks: 2
+    min_support_similarity: 0.10
+    require_intent_match: true
+    require_domain_match: true
+    min_helpful_before_verify: 2
+    disable_immediate_promotion: true
+    delta_threshold: 0.0
+    min_delta_mean: 0.0
+    min_lcb_delta_reward: 0.0
+    max_negative_transfer_rate: 0.0
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    weight_utility: 0.60
+    reject_negative_evidence: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == 1.0
+    assert metrics["support_replay_count"] == 2
+    assert metrics["support_replay_helpful_count"] == 0
+    assert metrics["support_replay_neutral_count"] == 2
+    assert metrics["verification_count"] == 1
+    assert metrics["verification_passed_count"] == 0
+    assert metrics["verification_failed_count"] == 1
+    assert metrics["active_memory_count"] == 0
+    assert metrics["candidate_memory_count"] == 3
+
+    candidate_records = [
+        json.loads(line)
+        for line in (output_dir / "candidate_memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    replay_records = [
+        json.loads(line)
+        for line in (output_dir / "replay_results.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    first_memory = next(
+        record
+        for record in candidate_records
+        if record["memory_id"] == "cand_000001_tiny_memory_order_seed_001"
+    )
+    support_replays = [
+        record for record in replay_records if record["replay_scope"] == "support_task_replay"
+    ]
+
+    assert first_memory["lifecycle"]["status"] == "candidate"
+    assert all(record["delta_reward"] == 0.0 for record in support_replays)
+    assert any(
+        record.get("event_type") == "verification_update"
+        and record.get("verification_passed") is False
+        and record.get("failure_reason") == "support_delta_mean_below_threshold"
+        and record.get("lifecycle_before", {}).get("status") == "candidate"
+        and record.get("lifecycle_after", {}).get("status") == "candidate"
+        for record in update_records
+    )
+
+
+def test_support_verification_mixed_evidence_refines_scope_and_logs_selection(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config_nt_gate_refine.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate_refine"
+    split_file = Path("data/task_splits/tiny_memory_dependent_tasks.json").resolve()
+    support_split_file = Path("data/task_splits/tiny_mixed_support_verification_tasks.json").resolve()
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_refine_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 1
+models:
+  actor:
+    provider: mock
+    model: mock-memory-sensitive-agent
+    follow_memory_hints: true
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 1
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  utility:
+    promote_after_helpful: 2
+    quarantine_after_harmful: 1
+  replay:
+    enabled: true
+    delta_threshold: 0.0
+    max_memories: 1
+    log_context_modes: true
+    promote_requires_positive_lcb: true
+  verification:
+    enabled: true
+    support_split_file: {support_split_file.as_posix()}
+    max_support_tasks: 4
+    min_support_tasks: 4
+    min_support_similarity: 0.0
+    require_intent_match: false
+    require_domain_match: true
+    min_helpful_before_verify: 2
+    disable_immediate_promotion: true
+    delta_threshold: 0.0
+    min_delta_mean: 0.0
+    min_lcb_delta_reward: 0.0
+    max_negative_transfer_rate: 0.0
+    log_support_selection: true
+    refinement:
+      enabled: true
+      min_helpful: 2
+      refined_status: active
+      quarantine_parent: true
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    weight_utility: 0.60
+    reject_negative_evidence: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == 1.0
+    assert metrics["support_replay_count"] == 4
+    assert metrics["support_replay_helpful_count"] == 2
+    assert metrics["support_replay_harmful_count"] == 2
+    assert metrics["verification_count"] == 1
+    assert metrics["verification_passed_count"] == 0
+    assert metrics["verification_failed_count"] == 1
+    assert metrics["memory_refinement_count"] == 1
+    assert metrics["memory_split_count"] == 1
+    assert metrics["candidate_memory_count"] == 2
+    assert metrics["active_memory_count"] == 1
+    assert metrics["quarantined_memory_count"] == 1
+    assert metrics["support_selection_count"] == 4
+    assert metrics["replay_prompt_tokens"] < metrics["replay_record_prompt_tokens"]
+    assert metrics["support_replay_prompt_tokens"] == metrics["support_replay_record_prompt_tokens"]
+
+    candidate_records = [
+        json.loads(line)
+        for line in (output_dir / "candidate_memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    replay_records = [
+        json.loads(line)
+        for line in (output_dir / "replay_results.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+    parent = next(
+        record
+        for record in candidate_records
+        if record["memory_id"] == "cand_000001_tiny_memory_order_seed_001"
+    )
+    child = next(
+        record
+        for record in candidate_records
+        if record["memory_id"].startswith("cand_000001_tiny_memory_order_seed_001__refined_")
+    )
+
+    assert parent["lifecycle"]["status"] == "quarantined"
+    assert child["lifecycle"]["status"] == "active"
+    assert child["scope"]["intent"] == "order_status"
+    assert any(
+        record.get("event_type") == "support_selection"
+        and record.get("memory_id") == "cand_000001_tiny_memory_order_seed_001"
+        and record.get("source_task_id") == "tiny_memory_order_replay_003"
+        and str(record.get("support_task_id", "")).startswith("tiny_mixed_support_")
+        and record.get("support_match_score") is not None
+        and record.get("intent_score") is not None
+        and record.get("tool_score") is not None
+        and record.get("lexical_score") is not None
+        for record in update_records
+    )
+    assert any(
+        record.get("event_type") == "memory_refine"
+        and record.get("parent_memory_id") == "cand_000001_tiny_memory_order_seed_001"
+        and record.get("child_memory_id") == child["memory_id"]
+        and record.get("trigger_reason") == "mixed_support_harmful"
+        for record in update_records
+    )
+    assert any(
+        record.get("replay_scope") == "support_task_replay"
+        and record.get("attribution_label") == "harmful"
+        for record in replay_records
+    )
+
+
+def test_verification_budget_skips_when_exhausted(tmp_path: Path) -> None:
+    config_path = tmp_path / "config_nt_gate_budget.yaml"
+    output_dir = tmp_path / "runs" / "nt_gate_budget"
+    split_file = Path("data/task_splits/tiny_memory_dependent_tasks.json").resolve()
+    support_split_file = Path("data/task_splits/tiny_support_verification_tasks.json").resolve()
+    config_path.write_text(
+        f"""
+experiment:
+  name: tiny_nt_gate_budget_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tiny_tools
+  split_file: {split_file.as_posix()}
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 1
+models:
+  actor:
+    provider: mock
+    model: mock-memory-sensitive-agent
+    follow_memory_hints: true
+    temperature: 0.0
+    max_tokens: 512
+memory:
+  method: nt_memevo_gate
+  top_k: 1
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  utility:
+    promote_after_helpful: 2
+    quarantine_after_harmful: 1
+  replay:
+    enabled: true
+    delta_threshold: 0.0
+    max_memories: 1
+    log_context_modes: true
+    promote_requires_positive_lcb: true
+  verification:
+    enabled: true
+    support_split_file: {support_split_file.as_posix()}
+    max_support_tasks: 2
+    min_support_tasks: 2
+    min_support_similarity: 0.10
+    require_intent_match: true
+    require_domain_match: true
+    min_helpful_before_verify: 2
+    disable_immediate_promotion: true
+    delta_threshold: 0.0
+    min_delta_mean: 0.0
+    min_lcb_delta_reward: 0.0
+    max_negative_transfer_rate: 0.0
+    max_verifications_per_run: 0
+  gate:
+    min_score: 0.30
+    min_similarity: 0.02
+    min_precondition: 0.25
+    weight_utility: 0.60
+    reject_negative_evidence: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == 1.0
+    assert metrics["verification_count"] == 0
+    assert metrics["verification_budget_skipped_count"] == 1
+    assert metrics["verification_budget_skip_reasons"] == {
+        "max_verifications_per_run_exhausted": 1
+    }
+    assert metrics["support_replay_count"] == 0
+    assert metrics["memory_refinement_count"] == 0
+
+    update_records = [
+        json.loads(line)
+        for line in (output_dir / "memory_updates.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert any(
+        record.get("event_type") == "verification_skipped"
+        and record.get("skip_reason") == "max_verifications_per_run_exhausted"
+        for record in update_records
+    )
+
+
 def test_nt_memevo_gate_rejects_polluted_bootstrap_memory(tmp_path: Path) -> None:
     config_path = tmp_path / "config_nt_gate_polluted.yaml"
     output_dir = tmp_path / "runs" / "nt_gate_polluted"

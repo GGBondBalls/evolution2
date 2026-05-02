@@ -11,6 +11,11 @@ from ntmemevo.config import load_config
 from ntmemevo.envs.factory import create_env
 from ntmemevo.evaluation.metrics import aggregate_negative_transfer, aggregate_results
 from ntmemevo.evaluation.replay import ReplayConfig, ReplayResult, run_memory_replays
+from ntmemevo.evaluation.verification import (
+    MemoryVerifier,
+    VerificationConfig,
+    VerificationResult,
+)
 from ntmemevo.llm.client import create_llm_client
 from ntmemevo.logging.run_logger import RunLogger
 from ntmemevo.logging.trace_logger import TraceLogger
@@ -19,7 +24,12 @@ from ntmemevo.memory.gate import GateDecision, RetrieverGate, RetrieverGateConfi
 from ntmemevo.memory.raw_trace_store import RawTraceMemoryStore
 from ntmemevo.memory.reflection_memory import ReflectionExtractor, ReflectionMemoryStore
 from ntmemevo.memory.retriever import LexicalMemoryRetriever
-from ntmemevo.memory.store import CandidateMemoryStore, UtilityUpdate
+from ntmemevo.memory.store import (
+    CandidateMemoryStore,
+    ScopeRefinementUpdate,
+    UtilityUpdate,
+    VerificationUpdate,
+)
 from ntmemevo.types import AgentResult
 
 
@@ -58,6 +68,23 @@ def run(config_path: str) -> dict[str, Any]:
     quarantine_after_harmful = int(utility_config.get("quarantine_after_harmful", 1))
     replay_config = ReplayConfig.from_config(memory_config.get("replay"))
     replay_results: list[ReplayResult] = []
+    verification_config = VerificationConfig.from_config(memory_config.get("verification"))
+    verification_results: list[VerificationResult] = []
+    verification_updates: list[VerificationUpdate] = []
+    refinement_updates: list[ScopeRefinementUpdate] = []
+    verified_memory_ids: set[str] = set()
+    verification_budget_skips: Counter[str] = Counter()
+    support_tasks = []
+    support_benchmark_config: dict[str, Any] | None = None
+    if verification_config.enabled:
+        if verification_config.support_split_file is None:
+            raise ValueError(
+                "memory.verification.support_split_file is required when verification is enabled"
+            )
+        support_benchmark_config = dict(config.benchmark)
+        support_benchmark_config["split_file"] = str(verification_config.support_split_file)
+        support_env = create_env(support_benchmark_config)
+        support_tasks = support_env.load_tasks()
     if memory_policy == "raw_trace_rag":
         memory_store = RawTraceMemoryStore(
             path=config.output_dir / "memories.jsonl",
@@ -238,6 +265,7 @@ def run(config_path: str) -> dict[str, Any]:
                         promote_requires_positive_lcb=(
                             replay_config.promote_requires_positive_lcb
                         ),
+                        allow_promotion=_allow_immediate_promotion(verification_config),
                     )
                 else:
                     update = memory_store.update_utility(
@@ -249,6 +277,7 @@ def run(config_path: str) -> dict[str, Any]:
                         no_memory_reward=no_memory_reward_by_task.get(task.task_id),
                         promote_after_helpful=promote_after_helpful,
                         quarantine_after_harmful=quarantine_after_harmful,
+                        allow_promotion=_allow_immediate_promotion(verification_config),
                     )
                 utility_updates.append(update)
                 record = update.to_json()
@@ -277,6 +306,154 @@ def run(config_path: str) -> dict[str, Any]:
                         }
                     )
                 run_logger.append_jsonl("memory_updates.jsonl", record)
+                if _should_verify_memory(
+                    update=update,
+                    verification_config=verification_config,
+                    verified_memory_ids=verified_memory_ids,
+                ):
+                    budget_skip_reason = _verification_budget_skip_reason(
+                        verification_config=verification_config,
+                        verification_count=len(verification_results),
+                        support_replay_count=sum(
+                            1
+                            for replay_result in replay_results
+                            if replay_result.replay_scope == "support_task_replay"
+                        ),
+                    )
+                    if budget_skip_reason is not None:
+                        verification_budget_skips[budget_skip_reason] += 1
+                        run_logger.append_jsonl(
+                            "memory_updates.jsonl",
+                            {
+                                "event_type": "verification_skipped",
+                                "iteration": index,
+                                "task_id": task.task_id,
+                                "run_id": run_id,
+                                "memory_policy": memory_policy,
+                                "memory_id": memory_id,
+                                "skip_reason": budget_skip_reason,
+                                "verification_count": len(verification_results),
+                            },
+                        )
+                        continue
+                    if support_benchmark_config is None:
+                        raise RuntimeError("Verification support benchmark is not configured")
+                    candidate = memory_store.get(memory_id)
+                    verification_result, support_replay_results = MemoryVerifier(
+                        agent=agent,
+                        env_factory=lambda: create_env(support_benchmark_config),
+                        support_tasks=support_tasks,
+                        config=verification_config,
+                    ).verify(
+                        memory=candidate,
+                        source_run_id=run_id,
+                    )
+                    verified_memory_ids.add(memory_id)
+                    verification_results.append(verification_result)
+                    replay_results.extend(support_replay_results)
+                    for support_replay_result in support_replay_results:
+                        run_logger.append_jsonl(
+                            "replay_results.jsonl",
+                            support_replay_result.to_json(),
+                        )
+                    if verification_config.log_support_selection:
+                        for support_detail in verification_result.support_match_details:
+                            selection_record = dict(support_detail)
+                            support_task_id = selection_record.get("task_id")
+                            selection_record.update(
+                                {
+                                    "event_type": "support_selection",
+                                    "iteration": index,
+                                    "task_id": task.task_id,
+                                    "source_task_id": task.task_id,
+                                    "support_task_id": support_task_id,
+                                    "run_id": run_id,
+                                    "memory_policy": memory_policy,
+                                    "memory_id": memory_id,
+                                    "verification_id": verification_result.verification_id,
+                                }
+                            )
+                            run_logger.append_jsonl(
+                                "memory_updates.jsonl",
+                                selection_record,
+                            )
+                    verification_update = memory_store.apply_verification_result(
+                        memory_id=memory_id,
+                        verification_id=verification_result.verification_id,
+                        source_run_id=verification_result.source_run_id,
+                        support_task_ids=verification_result.support_task_ids,
+                        support_delta_mean=verification_result.support_delta_mean,
+                        support_lcb_delta_reward=(
+                            verification_result.support_lcb_delta_reward
+                        ),
+                        support_negative_transfer_rate=(
+                            verification_result.support_negative_transfer_rate
+                        ),
+                        support_replay_count=verification_result.support_replay_count,
+                        support_replay_helpful_count=(
+                            verification_result.support_replay_helpful_count
+                        ),
+                        support_replay_harmful_count=(
+                            verification_result.support_replay_harmful_count
+                        ),
+                        support_replay_neutral_count=(
+                            verification_result.support_replay_neutral_count
+                        ),
+                        verification_passed=verification_result.verification_passed,
+                        failure_reason=verification_result.failure_reason,
+                        positive_evidence_ids=verification_result.positive_evidence_ids,
+                        negative_evidence_ids=verification_result.negative_evidence_ids,
+                        quarantine_on_negative_transfer=(
+                            verification_config.quarantine_on_negative_transfer
+                        ),
+                        retire_on_verification_failure=(
+                            verification_config.retire_on_verification_failure
+                        ),
+                    )
+                    verification_updates.append(verification_update)
+                    verification_record = verification_update.to_json()
+                    verification_record.update(
+                        {
+                            "event_type": "verification_update",
+                            "iteration": index,
+                            "task_id": task.task_id,
+                            "run_id": run_id,
+                            "memory_policy": memory_policy,
+                        }
+                    )
+                    run_logger.append_jsonl("memory_updates.jsonl", verification_record)
+                    if (
+                        verification_config.enable_scope_refinement
+                        and not verification_result.verification_passed
+                    ):
+                        refinement_update = memory_store.refine_scope_from_verification(
+                            memory_id=memory_id,
+                            verification_id=verification_result.verification_id,
+                            source_run_id=verification_result.source_run_id,
+                            iteration=index,
+                            support_match_details=verification_result.support_match_details,
+                            min_helpful=verification_config.min_refinement_helpful,
+                            refined_status=verification_config.refined_memory_status,
+                            quarantine_parent=(
+                                verification_config.quarantine_parent_on_refinement
+                            ),
+                        )
+                        if refinement_update is not None:
+                            refinement_updates.append(refinement_update)
+                            refinement_record = refinement_update.to_json()
+                            refinement_record.update(
+                                {
+                                    "event_type": "memory_refine",
+                                    "iteration": index,
+                                    "task_id": task.task_id,
+                                    "run_id": run_id,
+                                    "memory_policy": memory_policy,
+                                }
+                            )
+                            run_logger.append_jsonl(
+                                "memory_updates.jsonl",
+                                refinement_record,
+                            )
 
         if memory_store is not None:
             if memory_policy in {"nt_memevo_candidate", "nt_memevo_gate"}:
@@ -366,6 +543,92 @@ def run(config_path: str) -> dict[str, Any]:
     metrics["replay_helpful_count"] = replay_label_counts.get("helpful", 0)
     metrics["replay_harmful_count"] = replay_label_counts.get("harmful", 0)
     metrics["replay_neutral_count"] = replay_label_counts.get("neutral", 0)
+    support_replay_results = [
+        replay_result
+        for replay_result in replay_results
+        if replay_result.replay_scope == "support_task_replay"
+    ]
+    support_label_counts = Counter(
+        replay_result.attribution_label for replay_result in support_replay_results
+    )
+    metrics["support_replay_count"] = len(support_replay_results)
+    metrics["support_replay_helpful_count"] = support_label_counts.get("helpful", 0)
+    metrics["support_replay_harmful_count"] = support_label_counts.get("harmful", 0)
+    metrics["support_replay_neutral_count"] = support_label_counts.get("neutral", 0)
+    verification_passed_count = sum(
+        1 for result in verification_results if result.verification_passed
+    )
+    metrics["verification_count"] = len(verification_results)
+    metrics["verification_passed_count"] = verification_passed_count
+    metrics["verification_failed_count"] = len(verification_results) - verification_passed_count
+    metrics["verification_update_count"] = len(verification_updates)
+    metrics["support_selection_count"] = sum(
+        len(result.support_match_details) for result in verification_results
+    )
+    metrics["memory_refinement_count"] = len(refinement_updates)
+    metrics["memory_split_count"] = len(refinement_updates)
+    metrics["verification_budget_skipped_count"] = sum(verification_budget_skips.values())
+    metrics["verification_budget_skip_reasons"] = dict(
+        sorted(verification_budget_skips.items())
+    )
+    metrics["verification_budget_max_verifications"] = (
+        verification_config.max_verifications_per_run
+    )
+    metrics["verification_budget_max_support_replay_records"] = (
+        verification_config.max_support_replay_records_per_run
+    )
+    metrics["verification_budget_verifications_used"] = len(verification_results)
+    metrics["verification_budget_support_replay_records_used"] = len(
+        support_replay_results
+    )
+    metrics["replay_record_prompt_tokens"] = _sum_replay_tokens(replay_results, "prompt")
+    metrics["replay_record_completion_tokens"] = _sum_replay_tokens(
+        replay_results,
+        "completion",
+    )
+    metrics["replay_record_tool_calls"] = _sum_replay_tool_calls(replay_results)
+    metrics["replay_unique_execution_count"] = _count_unique_replay_executions(
+        replay_results
+    )
+    metrics["replay_prompt_tokens"] = _sum_unique_replay_tokens(replay_results, "prompt")
+    metrics["replay_completion_tokens"] = _sum_unique_replay_tokens(
+        replay_results,
+        "completion",
+    )
+    metrics["replay_tool_calls"] = _sum_unique_replay_tool_calls(replay_results)
+    metrics["replay_delta_prompt_tokens"] = _sum_replay_deltas(
+        replay_results,
+        "delta_prompt_tokens",
+    )
+    metrics["replay_delta_tool_calls"] = _sum_replay_deltas(
+        replay_results,
+        "delta_tool_calls",
+    )
+    metrics["support_replay_record_prompt_tokens"] = _sum_replay_tokens(
+        support_replay_results,
+        "prompt",
+    )
+    metrics["support_replay_record_completion_tokens"] = _sum_replay_tokens(
+        support_replay_results,
+        "completion",
+    )
+    metrics["support_replay_record_tool_calls"] = _sum_replay_tool_calls(
+        support_replay_results
+    )
+    metrics["support_replay_unique_execution_count"] = _count_unique_replay_executions(
+        support_replay_results
+    )
+    metrics["support_replay_prompt_tokens"] = _sum_unique_replay_tokens(
+        support_replay_results,
+        "prompt",
+    )
+    metrics["support_replay_completion_tokens"] = _sum_unique_replay_tokens(
+        support_replay_results,
+        "completion",
+    )
+    metrics["support_replay_tool_calls"] = _sum_unique_replay_tool_calls(
+        support_replay_results
+    )
     if isinstance(memory_store, CandidateMemoryStore):
         lifecycle_counts = Counter(memory.lifecycle.status for memory in memory_store.all())
         metrics["candidate_memory_count"] = lifecycle_counts.get("candidate", 0)
@@ -374,6 +637,126 @@ def run(config_path: str) -> dict[str, Any]:
         metrics["retired_memory_count"] = lifecycle_counts.get("retired", 0)
     run_logger.write_metrics(metrics)
     return metrics
+
+
+def _allow_immediate_promotion(verification_config: VerificationConfig) -> bool:
+    return not (
+        verification_config.enabled
+        and verification_config.disable_immediate_promotion
+    )
+
+
+def _should_verify_memory(
+    update: UtilityUpdate,
+    verification_config: VerificationConfig,
+    verified_memory_ids: set[str],
+) -> bool:
+    if not verification_config.enabled:
+        return False
+    if update.outcome != "helpful":
+        return False
+    if update.memory.memory_id in verified_memory_ids:
+        return False
+    if update.memory.lifecycle.status != "candidate":
+        return False
+    return update.memory.utility.num_helpful >= verification_config.min_helpful_before_verify
+
+
+def _verification_budget_skip_reason(
+    verification_config: VerificationConfig,
+    verification_count: int,
+    support_replay_count: int,
+) -> str | None:
+    max_verifications = verification_config.max_verifications_per_run
+    if max_verifications is not None and verification_count >= max_verifications:
+        return "max_verifications_per_run_exhausted"
+    max_support_replays = verification_config.max_support_replay_records_per_run
+    if (
+        max_support_replays is not None
+        and support_replay_count + verification_config.max_support_tasks > max_support_replays
+    ):
+        return "max_support_replay_records_per_run_exhausted"
+    return None
+
+
+def _sum_replay_tokens(replay_results: list[ReplayResult], token_kind: str) -> int:
+    with_attr = f"with_{token_kind}_tokens"
+    without_attr = f"without_{token_kind}_tokens"
+    return sum(
+        int(value)
+        for replay_result in replay_results
+        for value in (
+            getattr(replay_result, with_attr),
+            getattr(replay_result, without_attr),
+        )
+        if value is not None
+    )
+
+
+def _sum_replay_tool_calls(replay_results: list[ReplayResult]) -> int:
+    return sum(
+        int(value)
+        for replay_result in replay_results
+        for value in (
+            replay_result.with_tool_calls,
+            replay_result.without_tool_calls,
+        )
+        if value is not None
+    )
+
+
+def _sum_replay_deltas(replay_results: list[ReplayResult], field_name: str) -> int:
+    return sum(
+        int(value)
+        for replay_result in replay_results
+        for value in (getattr(replay_result, field_name),)
+        if value is not None
+    )
+
+
+def _count_unique_replay_executions(replay_results: list[ReplayResult]) -> int:
+    return len(_unique_replay_executions(replay_results))
+
+
+def _sum_unique_replay_tokens(
+    replay_results: list[ReplayResult],
+    token_kind: str,
+) -> int:
+    field_index = 0 if token_kind == "prompt" else 1
+    return sum(values[field_index] for values in _unique_replay_executions(replay_results).values())
+
+
+def _sum_unique_replay_tool_calls(replay_results: list[ReplayResult]) -> int:
+    return sum(values[2] for values in _unique_replay_executions(replay_results).values())
+
+
+def _unique_replay_executions(
+    replay_results: list[ReplayResult],
+) -> dict[str, tuple[int, int, int]]:
+    executions: dict[str, tuple[int, int, int]] = {}
+    for replay_result in replay_results:
+        for side in ("with", "without"):
+            execution_id = getattr(replay_result, f"{side}_execution_id")
+            prompt_tokens = getattr(replay_result, f"{side}_prompt_tokens")
+            completion_tokens = getattr(replay_result, f"{side}_completion_tokens")
+            tool_calls = getattr(replay_result, f"{side}_tool_calls")
+            if (
+                prompt_tokens is None
+                and completion_tokens is None
+                and tool_calls is None
+            ):
+                continue
+            if execution_id is None:
+                execution_id = f"{replay_result.replay_id}:{side}"
+            executions.setdefault(
+                execution_id,
+                (
+                    int(prompt_tokens or 0),
+                    int(completion_tokens or 0),
+                    int(tool_calls or 0),
+                ),
+            )
+    return executions
 
 
 def main() -> None:

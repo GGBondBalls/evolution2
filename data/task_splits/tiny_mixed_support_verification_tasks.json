@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": "tiny_mixed_support_order_001",
+    "instruction": "Find the delivery status for the same order from the prior order-status example.",
+    "expected_answer_contains": ["delivered"],
+    "domain": "retail",
+    "intent": "order_status",
+    "tool_names": ["get_order_status"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_mixed_support_order_002",
+    "instruction": "Use the prior order-status example to report that same order's delivery status.",
+    "expected_answer_contains": ["delivered"],
+    "domain": "retail",
+    "intent": "order_status",
+    "tool_names": ["get_order_status"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_mixed_support_refund_001",
+    "instruction": "Decide whether order ORD-1002 can be refunded.",
+    "expected_answer_contains": ["not refundable"],
+    "domain": "retail",
+    "intent": "refund_eligibility",
+    "tool_names": ["get_order_status"],
+    "no_memory_success": true,
+    "no_memory_reward": 1.0
+  },
+  {
+    "task_id": "tiny_mixed_support_exchange_001",
+    "instruction": "For order ORD-1003, verify whether SKU-BLUE-S can be used as an exchange replacement.",
+    "expected_answer_contains": ["exchange eligible"],
+    "domain": "retail",
+    "intent": "exchange_eligibility",
+    "tool_names": ["check_exchange_eligibility"],
+    "no_memory_success": true,
+    "no_memory_reward": 1.0
+  }
+]

@@ -1,0 +1,102 @@
+[
+  {
+    "task_id": "tiny_support_order_001",
+    "instruction": "Find the delivery status for the same order from the prior order-status example.",
+    "expected_answer_contains": ["delivered"],
+    "domain": "retail",
+    "intent": "order_status",
+    "tool_names": ["get_order_status"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_order_002",
+    "instruction": "Use the prior order-status example to report that same order's delivery status.",
+    "expected_answer_contains": ["delivered"],
+    "domain": "retail",
+    "intent": "order_status",
+    "tool_names": ["get_order_status"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_refund_001",
+    "instruction": "Decide refund eligibility for the same order from the prior refund example.",
+    "expected_answer_contains": ["not refundable"],
+    "domain": "retail",
+    "intent": "refund_eligibility",
+    "tool_names": ["get_order_status"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_refund_002",
+    "instruction": "Use the prior refund example to decide whether that same order can be refunded.",
+    "expected_answer_contains": ["not refundable"],
+    "domain": "retail",
+    "intent": "refund_eligibility",
+    "tool_names": ["get_order_status"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_exchange_001",
+    "instruction": "Check exchange eligibility for the same order and replacement from the prior exchange example.",
+    "expected_answer_contains": ["exchange eligible"],
+    "domain": "retail",
+    "intent": "exchange_eligibility",
+    "tool_names": ["check_exchange_eligibility"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_exchange_002",
+    "instruction": "Use the prior exchange example to verify whether that same replacement is eligible.",
+    "expected_answer_contains": ["exchange eligible"],
+    "domain": "retail",
+    "intent": "exchange_eligibility",
+    "tool_names": ["check_exchange_eligibility"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_inventory_001",
+    "instruction": "Check stock for the same SKU from the prior inventory example.",
+    "expected_answer_contains": ["in_stock"],
+    "domain": "retail",
+    "intent": "inventory_check",
+    "tool_names": ["check_inventory"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_inventory_002",
+    "instruction": "Use the prior inventory example to report whether that same SKU is in stock.",
+    "expected_answer_contains": ["in_stock"],
+    "domain": "retail",
+    "intent": "inventory_check",
+    "tool_names": ["check_inventory"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_policy_001",
+    "instruction": "Look up the same policy from the prior policy example.",
+    "expected_answer_contains": ["30 days"],
+    "domain": "retail",
+    "intent": "policy_lookup",
+    "tool_names": ["lookup_policy"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  },
+  {
+    "task_id": "tiny_support_policy_002",
+    "instruction": "Use the prior policy example to answer the same delivered-order return-window question.",
+    "expected_answer_contains": ["30 days"],
+    "domain": "retail",
+    "intent": "policy_lookup",
+    "tool_names": ["lookup_policy"],
+    "no_memory_success": false,
+    "no_memory_reward": 0.0
+  }
+]

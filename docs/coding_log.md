@@ -592,3 +592,180 @@ head -n 2 runs/tiny_nt_memevo_gate_unsafe_polluted_seed1/candidate_memories.json
 6. 新增 metrics：`verification_count`、`verification_passed_count`、`verification_failed_count`、`support_replay_count`、`support_replay_helpful_count`、`support_replay_harmful_count` 和 replay token/tool 成本。
 7. 保持第七轮所有配置不回归：`repeated` 继续覆盖 online proxy fallback，`replay` 覆盖 helpful attribution，`polluted` 覆盖 safe rejection，`unsafe_polluted` 覆盖 harmful attribution 和 quarantine。
 8. 第八轮仍建议暂缓 tau-bench retail；待 support-set verification 和 consolidation 日志稳定后再迁移真实 benchmark。
+
+## 2026-05-02 第一阶段第八轮
+
+目标：落实 support-set replay 与 verification-gated consolidation，把第七轮“当前任务 leave-one-memory-out 归因”扩展为“相似支持任务集合验证”，并让 candidate promotion 可以由独立 verification gate 决定。
+
+已完成：
+
+1. 新增 `src/ntmemevo/evaluation/verification.py`，实现 `VerificationConfig`、`SupportTaskSelector`、`MemoryVerifier` 和 `VerificationResult`。
+2. Support task selector 根据 intent、domain、tool overlap 和 lexical similarity 从 support pool 中选择相似任务，支持 `require_intent_match`、`require_domain_match`、`min_support_similarity`、`max_support_tasks` 和 `min_support_tasks`。
+3. `MemoryVerifier` 对待验证 candidate memory 在 support task set 上运行 `with memory` / `without memory` replay，计算 `support_delta_mean`、`support_lcb_delta_reward`、`support_negative_transfer_rate`、support helpful/harmful/neutral 计数和 `verification_passed`。
+4. 扩展 `ReplayResult`，新增 `replay_scope`、`support_task_replay` mode、`cost_adjusted_delta_reward`、`delta_prompt_tokens`、`delta_completion_tokens` 和 `delta_tool_calls`，使 `replay_results.jsonl` 可以区分 `source_task_replay` 与 `support_task_replay`。
+5. 扩展 `ReplayConfig`，新增 `prompt_token_cost_weight` 和 `tool_call_cost_weight`，为后续 cost-adjusted replay delta 保留配置入口。
+6. 扩展 `CandidateMemoryStore`，新增 `VerificationUpdate` 和 `apply_verification_result()`，可根据 support-set 验证结果把 candidate promotion 为 `active`，或在 support negative transfer 时进入 `quarantined`。
+7. `CandidateMemoryStore.update_utility()` 和 `update_utility_from_replay()` 新增 `allow_promotion` 开关；当 `memory.verification.disable_immediate_promotion=true` 时，source-task utility update 只累计 evidence/utility，不直接把 candidate 提升为 active。
+8. 修改 `run_stream`，支持 `memory.verification.enabled=true`：加载 support split、触发 support-set verification、写入 support replay 记录、写入 `verification_update` 事件，并汇总 verification/support replay metrics。
+9. 新增 support task fixture：`data/task_splits/tiny_support_verification_tasks.json`，覆盖 `order_status`、`refund_eligibility` 和 `exchange_eligibility` 三类 support tasks。
+10. 新增配置 `configs/tiny_nt_memevo_gate_verify.yaml`，用于验证 replay-helpful source memory 先保持 `candidate`，随后通过 support-set verification 才进入 `active`。
+11. 新增测试：support-set verification 通过后 promotion、support replay 中性时 verification failed 且保持 candidate，同时保留第七轮 replay / repeated / polluted / unsafe polluted 行为不回归。
+12. 更新 `README.md`，加入 verification 配置运行命令、`verification_update` 字段、support replay 字段和新增 metrics。
+
+关键实现说明：
+
+1. Verification 是独立配置开关，默认关闭；前七轮配置不启用 verification，因此 repeated online proxy、source-task replay、safe polluted rejection 和 unsafe polluted harmful replay 均保持原语义。
+2. `tiny_nt_memevo_gate_verify.yaml` 使用 `memory.verification.disable_immediate_promotion=true`，因此 seed memory 在两次 source-task replay helpful 后仍保持 `candidate`；只有 support-set replay 给出 `support_delta_mean=1.0` 且 `support_lcb_delta_reward=0.292893` 后，`verification_update` 才将其提升为 `active`。
+3. Support replay 当前是 deterministic tiny 环境下的 matched support 验证，不是完整 tau-bench support-set verifier；但日志字段和 lifecycle 更新路径已经按真实实验需要预留。
+4. Replay cost metrics 当前按 replay log record 汇总，足够用于离线链路检查；后续若要精确报告真实成本，应按 replay cache 的 unique execution 去重统计。
+5. `VerificationResult.failure_reason` 覆盖 `insufficient_support_tasks`、`support_negative_transfer_rate_above_threshold`、`support_delta_mean_below_threshold` 和 `support_lcb_delta_reward_below_threshold`。
+
+验证记录：
+
+1. `python -m pytest` 通过，结果为 `13 passed in 0.10s`。
+2. 本地 shell 未安装 editable 包，编码侧 smoke 使用 `PYTHONPATH=src python -m ...`；用户在 `conda activate rm` 且 `pip install -e ".[dev]"` 后可直接运行 `python -m ...`。
+3. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml` 成功：`success_rate=1.0`、`memory_size=0`、`verification_count=0`。
+4. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_raw_trace_rag.yaml` 成功：`success_rate=1.0`、`memory_size=5`、`verification_count=0`。
+5. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_reflexion.yaml` 成功：`success_rate=1.0`、`memory_size=5`、`verification_count=0`。
+6. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_candidate.yaml` 成功：`success_rate=1.0`、`memory_size=5`、`candidate_memory_count=5`。
+7. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate.yaml` 成功：`success_rate=1.0`、`gate_decision_count=10`、`gate_accepted_count=0`、`gate_rejected_count=10`。
+8. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_repeated.yaml` 成功：`num_tasks=3`、`gate_accepted_count=3`、`utility_credit_sources={"online_proxy": 3}`、`active_memory_count=1`。
+9. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_replay.yaml` 成功：`num_tasks=3`、`gate_accepted_count=2`、`replay_leave_one_count=2`、`replay_helpful_count=2`、`active_memory_count=1`、`support_replay_count=0`。
+10. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_verify.yaml` 成功：`num_tasks=3`、`gate_accepted_count=2`、`replay_leave_one_count=2`、`support_replay_count=2`、`support_replay_helpful_count=2`、`verification_count=1`、`verification_passed_count=1`、`verification_failed_count=0`、`active_memory_count=1`。
+11. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_polluted.yaml` 成功：`success_rate=1.0`、`gate_rejected_count=15`、`gate_rejection_reasons={"negative_evidence_present": 5, "precondition_below_threshold": 10}`、`negative_transfer_rate=0.0`。
+12. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_unsafe_polluted.yaml` 成功触发 replay-backed harmful attribution：`num_tasks=1`、`success_rate=0.0`、`negative_transfer_rate=1.0`、`replay_harmful_count=1`、`quarantined_memory_count=1`。
+
+用户复验记录：
+
+1. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下运行 `python -m pytest`，环境为 Python 3.12.13、pytest 9.0.3、pluggy 1.6.0，结果为 `13 passed in 0.08s`。
+2. 用户复验 `tiny_nomem.yaml`：`success_rate=1.0`、`avg_prompt_tokens=310.4`、`memory_policy=none`、`memory_size=0`、`negative_transfer_rate=0.0`、`verification_count=0`。
+3. 用户复验 `tiny_raw_trace_rag.yaml`：`success_rate=1.0`、`avg_prompt_tokens=538.6`、`memory_policy=raw_trace_rag`、`memory_size=5`、`memory_top_k=2`、`verification_count=0`。
+4. 用户复验 `tiny_reflexion.yaml`：`success_rate=1.0`、`avg_prompt_tokens=832.2`、`memory_policy=reflexion`、`memory_size=5`、`memory_top_k=2`、`verification_count=0`。
+5. 用户复验 `tiny_nt_memevo_candidate.yaml`：`success_rate=1.0`、`avg_prompt_tokens=310.4`、`memory_policy=nt_memevo_candidate`、`memory_size=5`、`candidate_memory_count=5`、`active_memory_count=0`、`quarantined_memory_count=0`。
+6. 用户复验 `tiny_nt_memevo_gate.yaml`：`success_rate=1.0`、`memory_size=5`、`gate_decision_count=10`、`gate_accepted_count=0`、`gate_rejected_count=10`、`gate_rejection_reasons={"precondition_below_threshold": 10}`、`utility_update_count=0`。
+7. 用户复验 `tiny_nt_memevo_gate_repeated.yaml`：`num_tasks=3`、`success_rate=1.0`、`gate_accepted_count=3`、`utility_update_count=3`、`utility_credit_sources={"online_proxy": 3}`、`online_proxy_utility_update_count=3`、`active_memory_count=1`。这确认第六轮 online proxy fallback 未回归。
+8. 用户复验 `tiny_nt_memevo_gate_replay.yaml`：`num_tasks=3`、`success_rate=1.0`、`gate_accepted_count=2`、`gate_rejected_count=1`、`replay_result_count=6`、`replay_leave_one_count=2`、`replay_helpful_count=2`、`utility_credit_sources={"leave_one_memory_out": 2}`、`replay_utility_update_count=2`、`support_replay_count=0`、`active_memory_count=1`。这确认第七轮 source-task replay path 未回归。
+9. 用户复验 `tiny_nt_memevo_gate_verify.yaml`：`num_tasks=3`、`success_rate=1.0`、`gate_accepted_count=2`、`gate_rejected_count=1`、`replay_result_count=8`、`replay_leave_one_count=2`、`support_replay_count=2`、`support_replay_helpful_count=2`、`verification_count=1`、`verification_passed_count=1`、`verification_failed_count=0`、`verification_update_count=1`、`active_memory_count=1`。
+10. 用户检查 `runs/tiny_nt_memevo_gate_verify_seed1/metrics.json`，确认 support-set verification 指标与编码侧 smoke 一致，并新增 replay cost 字段：`replay_prompt_tokens=5876`、`replay_completion_tokens=800`、`replay_tool_calls=8`、`support_replay_prompt_tokens=1540`、`support_replay_completion_tokens=218`、`support_replay_tool_calls=2`。
+11. 用户检查 `runs/tiny_nt_memevo_gate_verify_seed1/memory_updates.jsonl`，确认 1 条 `event_type=verification_update`：`memory_id=cand_000001_tiny_memory_order_seed_001`、`verification_passed=true`、`support_task_ids=["tiny_support_order_001","tiny_support_order_002"]`、`support_delta_mean=1.0`、`support_lcb_delta_reward=0.292893`、`support_negative_transfer_rate=0.0`，并且 `lifecycle_before.status=candidate`、`lifecycle_after.status=active`。
+12. 用户检查 `runs/tiny_nt_memevo_gate_verify_seed1/replay_results.jsonl`，确认两条 `replay_scope=support_task_replay` 均为 `delta_reward=1.0`、`cost_adjusted_delta_reward=1.0`、`with_success=true`、`without_success=false`、`attribution_label=helpful`。
+13. 用户检查 `runs/tiny_nt_memevo_gate_verify_seed1/candidate_memories.jsonl`，确认 `cand_000001_tiny_memory_order_seed_001` 最终 `lifecycle.status=active`、`utility.mean_delta_reward=1.0`、`utility.lcb_delta_reward=0.292893`、`num_used=2`、`num_helpful=2`，且 `positive_evidence` 包含两个 support replay id。
+14. 用户复验 `tiny_nt_memevo_gate_polluted.yaml`：`success_rate=1.0`、`memory_size=6`、`gate_decision_count=15`、`gate_accepted_count=0`、`gate_rejected_count=15`、`gate_rejection_reasons={"negative_evidence_present": 5, "precondition_below_threshold": 10}`、`negative_transfer_rate=0.0`、`verification_count=0`。
+15. 用户复验 `tiny_nt_memevo_gate_unsafe_polluted.yaml`：`num_tasks=1`、`success_rate=0.0`、`negative_transfer_rate=1.0`、`harmful_memory_ids=["polluted_refund_lookup_policy_001"]`、`gate_accepted_count=1`、`replay_result_count=3`、`replay_leave_one_count=1`、`replay_harmful_count=1`、`replay_utility_update_count=1`、`quarantined_memory_count=1`。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_reflexion.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_candidate.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_repeated.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_replay.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_verify.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_polluted.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_unsafe_polluted.yaml
+
+cat runs/tiny_nt_memevo_gate_verify_seed1/metrics.json
+grep '"event_type": "verification_update"' runs/tiny_nt_memevo_gate_verify_seed1/memory_updates.jsonl
+grep '"replay_scope": "support_task_replay"' runs/tiny_nt_memevo_gate_verify_seed1/replay_results.jsonl
+head -n 3 runs/tiny_nt_memevo_gate_verify_seed1/candidate_memories.jsonl
+```
+
+实验日志填写建议：
+
+1. 新增 `tiny_nt_memevo_gate_verify_seed1` 实验条目，重点记录 `support_replay_count=2`、`verification_passed_count=1`、`support_delta_mean=1.0`、`support_lcb_delta_reward=0.292893` 和 seed memory 通过 `verification_update` 进入 `active`。
+2. 对照 `tiny_nt_memevo_gate_replay_seed1`：第七轮配置仍由 source-task replay-backed utility update 直接 promotion；第八轮 verify 配置则禁用即时 promotion，由 support-set verification 决定 promotion。
+3. 对照 `tiny_nt_memevo_gate_polluted_seed1` 和 `tiny_nt_memevo_gate_unsafe_polluted_seed1`：safe gate 仍拒绝污染记忆，unsafe gate 仍能触发 replay-backed harmful/quarantine，说明 verification 变更没有破坏负迁移链路。
+
+当前边界：
+
+1. Support pool 仍是 tiny 人工 fixture，主要用于验证日志和 lifecycle 机制；尚不能代表真实 benchmark 难度。
+2. Support selector 使用确定性 intent/domain/tool/lexical 打分，还不是 embedding retriever 或 learned selector。
+3. Verification 目前只在 memory 达到 `min_helpful_before_verify` 后触发一次；尚未实现周期性 re-verification、quarantined memory 恢复验证或主动 retire。
+4. Support replay 只做 reward/success 级别归因，尚未分析工具路径差异、答案差异或 policy violation 类型。
+5. tau-bench retail、embedding retrieval、learned ranker、memory merge/split 和精确 replay budget accounting 仍未实现。
+
+下一步建议：
+
+1. 扩展 support pool 和 matched replay，覆盖 refund、exchange、inventory、policy 多类 memory 的正/负验证。
+2. 实现 memory merge/split：当 support evidence 显示某条记忆只在部分 intent/domain 有益时，自动收窄 scope 或拆分记忆。
+3. 增加 replay budget 和 exact unique-execution cost accounting，避免 context mode 与 comparison record 重复计成本。
+4. 在 verification/consolidation 日志稳定后，接入 tau-bench retail 的真实 task loader、tool API wrapper 和 evaluator。
+
+## 第一阶段第九轮方向
+
+优先方向：扩展 support pool 与 matched replay，并开始实现 memory scope refinement / merge-split。理由是第八轮已经证明 support-set verification 能够独立决定 `candidate -> active`，但当前 support pool 仍只有 tiny 人工 order-status 正例；下一轮应让 support 验证覆盖更多 intent、更多正负样本，并开始处理“记忆在部分任务上有益、部分任务上有害”的负迁移核心问题。
+
+第九轮建议范围：
+
+1. 扩充 tiny support/task split，至少覆盖 `refund_eligibility`、`exchange_eligibility`、`inventory_check` 和 `policy_lookup` 的 memory-dependent 正例与 neutral/negative support 例子。
+2. 新增 matched replay selector：除 intent/domain/tool 匹配外，记录 support selection details，例如 `support_match_score`、`intent_score`、`tool_score`、`lexical_score`，并写入 `memory_updates.jsonl` 或独立 support selection 日志。
+3. 实现 scope refinement：当 support replay 的 harmful/neutral evidence 集中在某些 intent、tool 或 precondition 上时，生成更窄 scope 的 refined memory，而不是只 quarantine 或保留原 memory。
+4. 实现最小 merge/split 日志事件：`memory_split`、`memory_refine` 或 `memory_merge`，记录 parent memory id、child memory id、scope 变化、证据迁移和触发原因。
+5. 增加 replay budget controls：限制每轮 verification 的最大 memory 数、最大 support task 数和最大 replay 执行数，并把预算消耗写入 metrics。
+6. 修正 replay 成本统计为 unique execution 口径，避免 `with_selected_memory`、`without_selected_memory` 和 comparison record 的重复计数影响论文成本曲线。
+7. 保持第八轮所有配置不回归，尤其是 `tiny_nt_memevo_gate_verify.yaml` 的 `verification_passed_count=1` 和 unsafe polluted 的 `negative_transfer_rate=1.0`。
+8. 若第九轮 support/refinement 日志稳定，可开始 tau-bench retail 接入的最小 adapter；否则继续先稳定 tiny 上的负迁移拆分链路。
+
+## 2026-05-02 第一阶段第九轮
+
+目标：扩展 support pool 与 matched replay 的审计粒度，并实现最小 scope refinement / split 事件与 replay budget 控制，让第八轮的 verification gate 能在混合 support evidence 下产生更窄 scope 的 refined memory，而不是只做 candidate / active / quarantined 的二分。
+
+已完成：
+
+1. 扩展 `src/ntmemevo/evaluation/verification.py`，让 `VerificationConfig` 支持 `log_support_selection`、verification budget、scope refinement 开关与 refined memory status。
+2. 扩展 `SupportTaskMatch` / `VerificationResult`，把 `task_intent`、`task_domain`、`task_tool_names`、`support_match_score`、`intent_score`、`domain_score`、`tool_score`、`lexical_score` 与 replay attribution 一并写入结果对象。
+3. 扩展 `src/ntmemevo/evaluation/replay.py`，为 replay 记录增加 `with_execution_id` / `without_execution_id`，用于后续按 unique execution 口径统计 replay 成本。
+4. 扩展 `src/ntmemevo/memory/store.py`，新增 `ScopeRefinementUpdate` 与 `refine_scope_from_verification()`，在混合 support evidence 下生成 refined child memory，并把 parent 置为 quarantine。
+5. 修改 `src/ntmemevo/experiments/run_stream.py`，在 verification 过程中记录 `support_selection`、`verification_skipped` 与 `memory_refine` 事件，并新增 verification budget / replay unique-cost metrics。
+6. 扩充 `data/task_splits/tiny_support_verification_tasks.json`，新增 `inventory_check` 与 `policy_lookup` support tasks，使 support pool 覆盖 order、refund、exchange、inventory 与 policy 五类 intent。
+7. 新增 `data/task_splits/tiny_mixed_support_verification_tasks.json`，用于制造 order helpful、refund/exchange harmful 的 mixed-support verification 场景。
+8. 新增配置 `configs/tiny_nt_memevo_gate_refine.yaml`，用于验证 mixed-support 下的 scope refinement、support selection 审计与 verification budget 消耗统计。
+9. 新增测试：mixed-support verification 触发 `memory_refine` 并生成 refined child memory，以及 verification budget exhaustion 的跳过日志与 metrics。
+10. 更新 `README.md`，补充第九轮新的实验命令、support selection 字段、memory_refine 字段，以及 unique-execution replay cost 口径。
+
+验证记录：
+
+1. `PYTHONPATH=src python -m pytest` 通过，结果为 `15 passed in 0.13s`。
+2. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下运行 `python -m pytest`，环境为 Python 3.12.13、pytest 9.0.3、pluggy 1.6.0，结果为 `15 passed in 0.07s`。
+3. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_refine.yaml` 成功：`num_tasks=3`、`success_rate=1.0`、`gate_accepted_count=2`、`support_replay_count=4`、`support_replay_helpful_count=2`、`support_replay_harmful_count=2`、`verification_count=1`、`verification_passed_count=0`、`verification_failed_count=1`、`memory_refinement_count=1`、`memory_split_count=1`、`active_memory_count=1`、`quarantined_memory_count=1`。
+4. 用户检查 `runs/tiny_nt_memevo_gate_refine_seed1/memory_updates.jsonl`，确认 4 条 `support_selection`：两个 `order_status` support replay 为 `helpful`、`delta_reward=1.0`，一个 `refund_eligibility` 和一个 `exchange_eligibility` support replay 为 `harmful`、`delta_reward=-1.0`。
+5. 用户检查 `memory_refine` 事件，确认 parent memory `cand_000001_tiny_memory_order_seed_001` 因 `trigger_reason=mixed_support_harmful` 被 quarantine，并生成 child memory `cand_000001_tiny_memory_order_seed_001__refined_001`。
+6. 用户检查 `candidate_memories.jsonl`，确认 refined child memory 为 `active`，`scope.intent=order_status`，`utility.mean_delta_reward=1.0`，`utility.lcb_delta_reward=0.292893`，`num_helpful=2`，`negative_evidence=[]`。
+7. 用户完整回归第九轮全部配置通过：`tiny_nomem`、`tiny_raw_trace_rag`、`tiny_reflexion`、`tiny_nt_memevo_candidate`、`tiny_nt_memevo_gate`、`tiny_nt_memevo_gate_repeated`、`tiny_nt_memevo_gate_replay`、`tiny_nt_memevo_gate_verify`、`tiny_nt_memevo_gate_refine`、`tiny_nt_memevo_gate_polluted` 和 `tiny_nt_memevo_gate_unsafe_polluted` 均符合预期。
+8. 回归结果确认第八轮 `tiny_nt_memevo_gate_verify.yaml` 未回归：`verification_passed_count=1`、`support_replay_helpful_count=2`、`active_memory_count=1`。
+9. 回归结果确认 unsafe polluted 负迁移链路未回归：`negative_transfer_rate=1.0`、`harmful_memory_ids=["polluted_refund_lookup_policy_001"]`、`replay_harmful_count=1`、`quarantined_memory_count=1`。
+10. 用户复验暴露一个日志可读性问题：`support_selection` 事件中的顶层 `task_id` 表示 source task，support task id 没有独立字段；编码侧已补充 `source_task_id` 和 `support_task_id` 字段，并重新运行 `PYTHONPATH=src python -m pytest -q`，结果为 `15 passed in 0.12s`。
+
+当前边界：
+
+1. 第九轮已把 support selection 审计、verification budget 和 scope refinement 最小路径接通，但 refined memory 仍是确定性规则派生，不是 learned split policy。
+2. replay unique execution 口径已经落到 metrics，但当前仍是离线 tiny 验证，后续需要在真实 benchmark 上再校准成本统计。
+3. `tiny_nt_memevo_gate_refine.yaml` 的 harmful support 是人工构造的 tiny mixed-support 场景，作用是验证日志和 lifecycle 机制，不代表真实 benchmark 难度。
+4. tau-bench retail 接入仍未开始，下一轮可以在 support/refinement 日志稳定后接最小 adapter。
+
+下一步建议：
+
+1. 把同一套 support verification / scope refinement 日志迁移到 tau-bench retail 的最小 adapter，先让真实任务也能输出统一 `tasks/runs/trace/memory/replay/metrics` 文件。
+2. 增加真实 benchmark 下的 support pool 构造与 replay budget 控制，避免 tiny fixture 的过拟合。
+3. 后续再考虑 learned support selector、memory merge/split 策略和更严格的 unique-execution 成本去重。
+
+## 第一阶段第十轮方向
+
+优先方向：接入 tau-bench retail 的最小 adapter，并把现有 `none / raw_trace_rag / reflexion / nt_memevo_candidate / nt_memevo_gate` 日志协议迁移到真实工具任务。理由是第一阶段前九轮已经在 tiny 环境中跑通 candidate schema、risk gate、online utility、leave-one-memory-out replay、support-set verification 和 scope refinement；继续只扩 tiny fixture 会开始过拟合日志链路，下一步应让同一套机制面对真实 benchmark 的 task loader、tool API 和 evaluator。
+
+第十轮建议范围：
+
+1. 新增 tau-bench retail adapter 的最小入口：支持从本地 tau-bench 数据目录或配置路径加载 retail tasks，并转换为项目内 `Task`。
+2. 封装 retail tool API wrapper，至少先支持离线 smoke 或小样本任务所需的 order/customer/product/policy 类工具调用。
+3. 接入 evaluator：把 tau-bench 的终态评估或任务 reward 映射到 `success`、`reward`、`error_type`，保持现有 `runs.jsonl` 字段不变。
+4. 新增 `configs/tau_retail_nomem.yaml` 的可运行 smoke；若外部数据未安装，应给出明确错误信息和安装路径提示，不破坏 tiny 测试。
+5. 先跑极小任务数，例如 `max_tasks=1` 或 `max_tasks=3`，验证 `tasks.jsonl`、`runs.jsonl`、`trace_events.jsonl`、`metrics.json` 都能生成。
+6. 保持第九轮 tiny 全部配置不回归，尤其是 `tiny_nt_memevo_gate_refine.yaml` 的 `memory_refinement_count=1` 和 unsafe polluted 的 `negative_transfer_rate=1.0`。
+7. 若 tau-bench adapter 的外部依赖过重，本轮至少完成 adapter 接口、配置、错误提示、文档和跳过式测试；真实任务运行步骤写入实验日志，等待环境准备后复验。
