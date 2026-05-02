@@ -188,7 +188,7 @@ class RetrieverGate:
         )
 
     def _precondition_score(self, task: Task, memory: CandidateMemory) -> float:
-        task_intent = _infer_intent(task.instruction)
+        task_intent = _task_intent(task)
         if task_intent == memory.scope.intent:
             intent_score = 1.0
         elif "general_tool_use" in {task_intent, memory.scope.intent}:
@@ -318,16 +318,27 @@ def _token_overlap_score(left: str, right: str) -> float:
     return len(left_tokens & right_tokens) / len(left_tokens)
 
 
+def _task_intent(task: Task) -> str:
+    metadata_intent = task.metadata.get("intent")
+    if isinstance(metadata_intent, str) and metadata_intent.strip():
+        return metadata_intent.strip()
+    return _infer_intent(task.instruction)
+
+
 def _infer_intent(instruction: str) -> str:
     text = instruction.lower()
     if "exchange" in text:
         return "exchange_eligibility"
-    if "refund" in text:
-        return "refund_eligibility"
-    if "inventory" in text or "in stock" in text or "sku-" in text:
-        return "inventory_check"
     if "policy" in text or "return window" in text:
         return "policy_lookup"
+    if "refund" in text or "return" in text:
+        return "refund_eligibility"
+    if "customer" in text or "user id" in text or "email" in text or "zip code" in text:
+        return "customer_lookup"
+    if "product" in text or "item" in text:
+        return "product_lookup"
+    if "inventory" in text or "in stock" in text or "sku-" in text:
+        return "inventory_check"
     if "order" in text or "delivery status" in text:
         return "order_status"
     return "general_tool_use"

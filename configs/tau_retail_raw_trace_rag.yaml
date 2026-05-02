@@ -1,7 +1,7 @@
 experiment:
-  name: tau_retail_nomem_seed1
+  name: tau_retail_raw_trace_rag_seed1
   seed: 1
-  output_dir: runs/tau_retail_nomem_seed1
+  output_dir: runs/tau_retail_raw_trace_rag_seed1
 
 benchmark:
   name: tau_bench
@@ -14,7 +14,7 @@ benchmark:
 agent:
   type: react_tool_agent
   max_steps: 4
-  memory_top_k: 0
+  memory_top_k: 2
 
 models:
   actor:
@@ -22,6 +22,11 @@ models:
     model: mock-tool-agent
     temperature: 0.0
     max_tokens: 2048
+
+memory:
+  method: raw_trace_rag
+  top_k: 2
+  save_failures: true
 
 logging:
   save_raw_model_io: true

@@ -46,7 +46,7 @@ class CandidateMemoryExtractor:
         context: CandidateExtractionContext,
     ) -> CandidateMemory:
         memory_type = self._memory_type(task=task, result=result)
-        intent = self._intent(task.instruction)
+        intent = self._intent(task)
         tool_names = self._tool_names(result.trace_summary)
         positive_evidence = (context.run_id,) if result.success else ()
         negative_evidence = () if result.success else (context.run_id,)
@@ -111,10 +111,16 @@ class CandidateMemoryExtractor:
     def _memory_type(self, task: Task, result: AgentResult) -> str:
         if not result.success:
             return "warning"
-        intent = self._intent(task.instruction)
+        intent = self._intent(task)
         if intent == "policy_lookup":
             return "user_policy"
-        if intent in {"exchange_eligibility", "refund_eligibility"}:
+        if intent in {
+            "exchange_eligibility",
+            "exchange_item",
+            "refund_eligibility",
+            "refund_or_return",
+            "return_item",
+        }:
             return "constraint"
         return "tool_usage"
 
@@ -166,16 +172,26 @@ class CandidateMemoryExtractor:
             preconditions.append("available tools include: " + ", ".join(tool_names))
         return tuple(preconditions)
 
-    def _intent(self, instruction: str) -> str:
+    def _intent(self, task: Task) -> str:
+        metadata_intent = task.metadata.get("intent")
+        if isinstance(metadata_intent, str) and metadata_intent.strip():
+            return metadata_intent.strip()
+        return self._intent_from_text(task.instruction)
+
+    def _intent_from_text(self, instruction: str) -> str:
         text = instruction.lower()
         if "exchange" in text:
             return "exchange_eligibility"
-        if "refund" in text:
-            return "refund_eligibility"
-        if "inventory" in text or "in stock" in text or "sku-" in text:
-            return "inventory_check"
         if "policy" in text or "return window" in text:
             return "policy_lookup"
+        if "refund" in text or "return" in text:
+            return "refund_eligibility"
+        if "customer" in text or "user id" in text or "email" in text or "zip code" in text:
+            return "customer_lookup"
+        if "product" in text or "item" in text:
+            return "product_lookup"
+        if "inventory" in text or "in stock" in text or "sku-" in text:
+            return "inventory_check"
         if "order" in text or "delivery status" in text:
             return "order_status"
         return "general_tool_use"
@@ -189,7 +205,10 @@ class CandidateMemoryExtractor:
         return tuple(dict.fromkeys(names))
 
     def _identifiers(self, instruction: str) -> tuple[str, ...]:
-        matches = re.findall(r"\b(?:ORD|SKU)-[A-Z0-9-]+\b", instruction.upper())
+        matches = re.findall(
+            r"\b(?:ORD|SKU)-[A-Z0-9-]+\b|\b[A-Z]\d{7,}\b|\b\d{8,}\b|\b\d{5}(?:-\d{4})?\b",
+            instruction.upper(),
+        )
         return tuple(dict.fromkeys(matches))
 
     def _truncate(self, value: str) -> str:

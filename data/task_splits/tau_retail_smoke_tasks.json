@@ -1,0 +1,55 @@
+[
+  {
+    "task_id": "tau_retail_smoke_customer_001",
+    "instruction": "Find the user id for Yusuf Rossi in zip code 19122.",
+    "expected_answer_contains": ["user_1"],
+    "actions": [
+      {
+        "name": "find_user_id_by_name_zip",
+        "args": {
+          "first_name": "Yusuf",
+          "last_name": "Rossi",
+          "zip": "19122"
+        }
+      }
+    ],
+    "domain": "retail",
+    "intent": "customer_lookup",
+    "tool_names": ["find_user_id_by_name_zip"],
+    "no_memory_success": true
+  },
+  {
+    "task_id": "tau_retail_smoke_order_001",
+    "instruction": "Look up the details for order #W2378156.",
+    "expected_answer_contains": ["W2378156", "delivered"],
+    "actions": [
+      {
+        "name": "get_order_details",
+        "args": {
+          "order_id": "W2378156"
+        }
+      }
+    ],
+    "domain": "retail",
+    "intent": "order_lookup",
+    "tool_names": ["get_order_details"],
+    "no_memory_success": true
+  },
+  {
+    "task_id": "tau_retail_smoke_product_001",
+    "instruction": "Get product details for product 1656367028.",
+    "expected_answer_contains": ["1656367028", "Everyday Hoodie"],
+    "actions": [
+      {
+        "name": "get_product_details",
+        "args": {
+          "product_id": "1656367028"
+        }
+      }
+    ],
+    "domain": "retail",
+    "intent": "product_lookup",
+    "tool_names": ["get_product_details"],
+    "no_memory_success": true
+  }
+]

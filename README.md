@@ -18,6 +18,8 @@ Current scope:
 12. Run leave-one-memory-out replay for gated memories and use replay deltas for higher-confidence utility updates.
 13. Run support-set replay and verification-gated consolidation before promoting candidates to active memory.
 14. Record support selection details, replay budget usage, and scope-refinement events when support evidence is mixed.
+15. Run a minimal tau-bench retail adapter with local smoke tasks, retail DB tools, evaluator mapping, and the same task/run/trace/metric logs.
+16. Run tau-retail smoke baselines for `none`, `raw_trace_rag`, `reflexion`, `nt_memevo_candidate`, and `nt_memevo_gate`.
 
 ## Environment
 
@@ -91,6 +93,33 @@ Unsafe polluted ablation that intentionally accepts a harmful memory:
 ```powershell
 python -m ntmemevo.experiments.run_stream --config configs/tiny_nt_memevo_gate_unsafe_polluted.yaml
 ```
+
+Minimal tau-bench retail adapter smoke:
+
+```powershell
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml
+```
+
+Tau-retail smoke memory baselines:
+
+```powershell
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_reflexion.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_candidate.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_gate.yaml
+```
+
+`configs/tau_retail_nomem.yaml` uses local smoke fixtures by default:
+
+```text
+data/task_splits/tau_retail_smoke_tasks.json
+data/tau_bench/retail_smoke_db.json
+```
+
+To run against a real tau-bench retail checkout or exported split, set `benchmark.split_file`
+to a local JSON/JSONL/Python task file and set `benchmark.data_file` or `benchmark.data_dir`
+to retail data. The adapter also accepts `benchmark.task_module` or an installed tau-bench
+package with task modules. Missing task/data paths raise explicit setup errors.
 
 or:
 
@@ -237,9 +266,9 @@ pytest
 
 ## Next Milestone
 
-The next coding round should broaden verification coverage or connect tau-bench:
+The next coding round should close the first stage on real or exported tau-bench retail samples:
 
-1. Add broader support pools and matched replay for refund, exchange, inventory, and policy memories.
-2. Add memory merge/split logic when support evidence shows domain- or intent-specific negative transfer.
-3. Add replay budget controls and exact unique-execution cost accounting.
-4. Wire the tau-bench adapter to replace the toy environment.
+1. Replace the local tau-retail smoke fixture with an exported real tau-bench retail train/dev split on the target machine.
+2. Run no-memory plus at least one memory baseline on `max_tasks=1/3` real or exported retail samples.
+3. Broaden tau-bench tool coverage where official retail tasks require mutation, policy, or evaluator details beyond the smoke wrapper.
+4. Document any blocker with the local export schema, expected action fields, required DB files, and exact rerun commands.

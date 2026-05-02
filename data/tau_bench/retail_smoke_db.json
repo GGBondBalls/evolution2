@@ -1,0 +1,53 @@
+{
+  "users": [
+    {
+      "user_id": "user_1",
+      "first_name": "Yusuf",
+      "last_name": "Rossi",
+      "name": "Yusuf Rossi",
+      "email": "yusuf.rossi@example.com",
+      "zip": "19122",
+      "orders": ["W2378156"]
+    }
+  ],
+  "orders": [
+    {
+      "order_id": "W2378156",
+      "user_id": "user_1",
+      "status": "delivered",
+      "items": [
+        {
+          "item_id": "item_1",
+          "product_id": "1656367028",
+          "name": "Everyday Hoodie",
+          "quantity": 1
+        }
+      ],
+      "shipping_address": {
+        "city": "Philadelphia",
+        "state": "PA",
+        "zip": "19122"
+      },
+      "payment_method_id": "pm_1"
+    }
+  ],
+  "products": [
+    {
+      "product_id": "1656367028",
+      "name": "Everyday Hoodie",
+      "type": "apparel",
+      "price": 42.0,
+      "variants": [
+        {
+          "sku": "HOODIE-BLK-M",
+          "color": "black",
+          "size": "M"
+        }
+      ]
+    }
+  ],
+  "policies": {
+    "return_window": "Delivered retail orders can be returned within 30 days if the item is unused.",
+    "exchange_policy": "Delivered apparel can be exchanged for an in-stock variant within 30 days."
+  }
+}

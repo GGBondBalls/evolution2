@@ -107,6 +107,9 @@ class MockLLMClient(LLMClient):
                 "tool_name": "lookup_policy",
                 "args": {"policy_name": "return_window"},
             }
+        tau_retail_decision = self._decide_tau_retail_task(task_text)
+        if tau_retail_decision is not None:
+            return tau_retail_decision
 
         return {
             "thought": "No matching tool-use pattern was found.",
@@ -123,8 +126,20 @@ class MockLLMClient(LLMClient):
         if not block_match:
             return None
         memory_block = block_match.group(1)
+        tool_names = (
+            "get_order_status",
+            "check_inventory",
+            "check_exchange_eligibility",
+            "lookup_policy",
+            "find_user_id_by_name_zip",
+            "find_user_id_by_email",
+            "get_user_details",
+            "get_order_details",
+            "get_product_details",
+            "list_all_product_types",
+        )
         tool_match = re.search(
-            r"\b(get_order_status|check_inventory|check_exchange_eligibility|lookup_policy)"
+            r"\b(" + "|".join(re.escape(name) for name in tool_names) + r")"
             r"\((\{.*?\})\)",
             memory_block,
             flags=re.DOTALL,
@@ -144,6 +159,86 @@ class MockLLMClient(LLMClient):
             "tool_name": tool_name,
             "args": args,
         }
+
+    def _decide_tau_retail_task(self, task_text: str) -> dict[str, Any] | None:
+        lower_task = task_text.lower()
+        if "user id" in lower_task and ("zip" in lower_task or "postal" in lower_task):
+            name_match = re.search(
+                r"(?:for|named)\s+([A-Z][A-Za-z'-]+)\s+([A-Z][A-Za-z'-]+)",
+                task_text,
+            )
+            zip_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", task_text)
+            if name_match and zip_match:
+                return {
+                    "thought": "The task asks for a customer id by name and zip code.",
+                    "action": "tool",
+                    "tool_name": "find_user_id_by_name_zip",
+                    "args": {
+                        "first_name": name_match.group(1),
+                        "last_name": name_match.group(2),
+                        "zip": zip_match.group(1),
+                    },
+                }
+
+        email_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", task_text)
+        if email_match and ("user" in lower_task or "customer" in lower_task):
+            return {
+                "thought": "The task asks for a customer id by email.",
+                "action": "tool",
+                "tool_name": "find_user_id_by_email",
+                "args": {"email": email_match.group(0)},
+            }
+
+        order_match = re.search(r"#?([A-Z]\d{7,}|ORDER-\d+)", task_text, flags=re.IGNORECASE)
+        if order_match and "order" in lower_task:
+            return {
+                "thought": "The task asks for order details.",
+                "action": "tool",
+                "tool_name": "get_order_details",
+                "args": {"order_id": order_match.group(1).upper()},
+            }
+
+        product_match = re.search(
+            r"(?:product|item)\s+(?:id\s+)?#?([A-Z0-9][A-Za-z0-9_-]{4,})\b",
+            task_text,
+            flags=re.IGNORECASE,
+        )
+        if product_match and product_match.group(1).lower() in {"detail", "details"}:
+            product_match = re.search(
+                r"(?:for|about)\s+(?:product|item)\s+(?:id\s+)?#?([A-Z0-9][A-Za-z0-9_-]{4,})\b",
+                task_text,
+                flags=re.IGNORECASE,
+            )
+        if product_match and ("product" in lower_task or "item" in lower_task):
+            return {
+                "thought": "The task asks for product details.",
+                "action": "tool",
+                "tool_name": "get_product_details",
+                "args": {"product_id": product_match.group(1)},
+            }
+
+        if "list" in lower_task and "product type" in lower_task:
+            return {
+                "thought": "The task asks for product type enumeration.",
+                "action": "tool",
+                "tool_name": "list_all_product_types",
+                "args": {},
+            }
+
+        if "policy" in lower_task:
+            policy_name = "return_window"
+            if "exchange" in lower_task:
+                policy_name = "exchange_policy"
+            elif "cancel" in lower_task:
+                policy_name = "cancellation_policy"
+            return {
+                "thought": "The task asks for a retail policy lookup.",
+                "action": "tool",
+                "tool_name": "lookup_policy",
+                "args": {"policy_name": policy_name},
+            }
+
+        return None
 
 
 class OpenAIChatClient(LLMClient):

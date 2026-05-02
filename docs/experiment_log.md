@@ -1278,3 +1278,252 @@ python -m ntmemevo.experiments.run_stream --config configs/tiny_nomem.yaml
 ### 下一步
 
 记录下一轮应修改的代码或实验设置。
+
+## tau_retail_nomem_seed1
+
+### 实验名称
+
+`tau_retail_nomem_seed1`
+
+### 日期与环境
+
+2026-05-02，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+### 运行命令
+
+```bash
+conda activate rm
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml
+cat runs/tau_retail_nomem_seed1/metrics.json
+head -n 3 runs/tau_retail_nomem_seed1/tasks.jsonl
+tail -n 3 runs/tau_retail_nomem_seed1/runs.jsonl
+grep '"event_type": "tool_call"' runs/tau_retail_nomem_seed1/trace_events.jsonl
+```
+
+### 配置文件
+
+`configs/tau_retail_nomem.yaml`
+
+关键参数：`benchmark.name=tau_bench`，`benchmark.domain=retail`，`benchmark.split_file=data/task_splits/tau_retail_smoke_tasks.json`，`benchmark.data_file=data/tau_bench/retail_smoke_db.json`，`benchmark.evaluation=auto`，`max_tasks=3`，`agent.max_steps=4`，`memory_top_k=0`，`models.actor.provider=mock`。
+
+### 输出目录
+
+`runs/tau_retail_nomem_seed1/`
+
+### 结果
+
+`pytest` 结果：
+
+```text
+18 passed in 0.10s
+```
+
+`tau_retail_nomem_seed1/metrics.json`：
+
+```json
+{
+  "num_tasks": 3,
+  "success_rate": 1.0,
+  "avg_reward": 1.0,
+  "avg_steps": 2.0,
+  "avg_prompt_tokens": 858.0,
+  "avg_completion_tokens": 110.66666666666667,
+  "avg_tool_calls": 1.0,
+  "with_memory_fail_no_memory_success": 0,
+  "memory_attributed_failures": 0,
+  "negative_transfer_rate": 0.0,
+  "harmful_memory_ids": [],
+  "negative_transfer_failure_examples": [],
+  "memory_policy": "none",
+  "memory_size": 0,
+  "memory_top_k": 0,
+  "gate_decision_count": 0,
+  "gate_accepted_count": 0,
+  "gate_rejected_count": 0,
+  "gate_rejection_reasons": {},
+  "utility_update_count": 0,
+  "utility_helpful_count": 0,
+  "utility_harmful_count": 0,
+  "utility_neutral_count": 0,
+  "utility_credit_sources": {},
+  "online_proxy_utility_update_count": 0,
+  "replay_utility_update_count": 0,
+  "replay_result_count": 0,
+  "replay_leave_one_count": 0,
+  "replay_helpful_count": 0,
+  "replay_harmful_count": 0,
+  "replay_neutral_count": 0,
+  "support_replay_count": 0,
+  "support_replay_helpful_count": 0,
+  "support_replay_harmful_count": 0,
+  "support_replay_neutral_count": 0,
+  "verification_count": 0,
+  "verification_passed_count": 0,
+  "verification_failed_count": 0,
+  "verification_update_count": 0,
+  "support_selection_count": 0,
+  "memory_refinement_count": 0,
+  "memory_split_count": 0,
+  "verification_budget_skipped_count": 0,
+  "verification_budget_skip_reasons": {},
+  "verification_budget_max_verifications": null,
+  "verification_budget_max_support_replay_records": null,
+  "verification_budget_verifications_used": 0,
+  "verification_budget_support_replay_records_used": 0,
+  "replay_record_prompt_tokens": 0,
+  "replay_record_completion_tokens": 0,
+  "replay_record_tool_calls": 0,
+  "replay_unique_execution_count": 0,
+  "replay_prompt_tokens": 0,
+  "replay_completion_tokens": 0,
+  "replay_tool_calls": 0,
+  "replay_delta_prompt_tokens": 0,
+  "replay_delta_tool_calls": 0,
+  "support_replay_record_prompt_tokens": 0,
+  "support_replay_record_completion_tokens": 0,
+  "support_replay_record_tool_calls": 0,
+  "support_replay_unique_execution_count": 0,
+  "support_replay_prompt_tokens": 0,
+  "support_replay_completion_tokens": 0,
+  "support_replay_tool_calls": 0
+}
+```
+
+`tasks.jsonl` 抽查结果：
+
+1. 三条任务均包含 `metadata.benchmark=tau_bench` 和 `metadata.domain=retail`。
+2. 三条任务 intent 分别为 `customer_lookup`、`order_lookup` 和 `product_lookup`。
+3. 三条任务均保留 `tool_names`、`expected_actions` 和 `no_memory_success=true`，后续可直接接入 gate / replay / negative-transfer 指标。
+
+`runs.jsonl` 抽查结果：
+
+1. 三条任务均 `success=true`、`reward=1.0`、`num_steps=2`、`tool_calls=1`。
+2. 三条任务均 `memory_policy=none`、`used_memory_ids=[]`，符合 no-memory smoke 预期。
+3. `tau_retail_smoke_customer_001` 调用 `find_user_id_by_name_zip`，最终回答包含 `user_id=user_1`。
+4. `tau_retail_smoke_order_001` 调用 `get_order_details`，最终回答包含 `W2378156` 和 `delivered`。
+5. `tau_retail_smoke_product_001` 调用 `get_product_details`，最终回答包含 `1656367028` 和 `Everyday Hoodie`。
+
+`trace_events.jsonl` 抽查结果：
+
+1. 共 3 条 `event_type=tool_call`。
+2. tool call 覆盖 `find_user_id_by_name_zip`、`get_order_details` 和 `get_product_details`。
+3. 三条 tool call 均 `ok=true`，参数与 smoke task 的 expected action 一致。
+
+### 现象与问题
+
+第十轮 tau-retail no-memory smoke 复验通过。该实验确认最小 `TauBenchEnv` 已能在 Linux + conda `rm` 环境中加载本地 retail smoke task、调用 retail DB wrapper、写出统一日志并汇总 metrics。
+
+当前结果仍是本地 smoke fixture，不代表官方 tau-bench retail 完整 benchmark。三条任务均较简单，mock agent 通过确定性规则选择工具，因此该实验只验证 adapter、日志协议和 evaluator 映射，不用于报告方法效果。
+
+`avg_prompt_tokens=858.0` 明显高于 tiny no-memory 的 `310.4`，主要来自 tau-retail tool description 更长、tool schema 更复杂；后续真实 tau-bench 对照需要单独记录 token 成本。
+
+### 下一步
+
+第十轮 smoke 已通过。第一阶段实验收口还应补两轮：
+
+1. 第十一轮：把 `raw_trace_rag`、`reflexion`、`nt_memevo_candidate` 和 `nt_memevo_gate` 迁移到 tau-retail smoke，小样本验证统一日志和 memory 字段不回归。
+2. 第十二轮：接入真实或导出的 tau-bench retail 小样本，至少跑 `max_tasks=1/3` 的 no-memory 与一个 memory baseline，补齐官方 evaluator / action sequence / state diff 的最小适配问题。
+
+## tau_retail_multi_baseline_smoke_seed1
+
+### 实验名称
+
+`tau_retail_multi_baseline_smoke_seed1`
+
+### 日期与环境
+
+2026-05-02，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+### 运行命令
+
+```bash
+conda activate rm
+python -m pytest
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_reflexion.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_candidate.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_gate.yaml
+
+cat runs/tau_retail_nomem_seed1/metrics.json
+cat runs/tau_retail_raw_trace_rag_seed1/metrics.json
+cat runs/tau_retail_reflexion_seed1/metrics.json
+cat runs/tau_retail_nt_memevo_candidate_seed1/metrics.json
+cat runs/tau_retail_nt_memevo_gate_seed1/metrics.json
+
+head -n 3 runs/tau_retail_raw_trace_rag_seed1/memories.jsonl
+head -n 3 runs/tau_retail_reflexion_seed1/memories.jsonl
+head -n 3 runs/tau_retail_nt_memevo_candidate_seed1/candidate_memories.jsonl
+grep '"event_type": "gate_decision"' runs/tau_retail_nt_memevo_gate_seed1/memory_updates.jsonl
+tail -n 3 runs/tau_retail_nt_memevo_gate_seed1/runs.jsonl
+```
+
+### 配置文件
+
+1. `configs/tau_retail_nomem.yaml`
+2. `configs/tau_retail_raw_trace_rag.yaml`
+3. `configs/tau_retail_reflexion.yaml`
+4. `configs/tau_retail_nt_memevo_candidate.yaml`
+5. `configs/tau_retail_nt_memevo_gate.yaml`
+
+共同关键参数：`benchmark.name=tau_bench`，`benchmark.domain=retail`，`benchmark.split_file=data/task_splits/tau_retail_smoke_tasks.json`，`benchmark.data_file=data/tau_bench/retail_smoke_db.json`，`benchmark.evaluation=auto`，`max_tasks=3`，`agent.max_steps=4`，`models.actor.provider=mock`。
+
+baseline 关键参数：
+
+1. `tau_retail_nomem.yaml`：`memory.method` 未设置，`memory_top_k=0`。
+2. `tau_retail_raw_trace_rag.yaml`：`memory.method=raw_trace_rag`，`memory.top_k=2`。
+3. `tau_retail_reflexion.yaml`：`memory.method=reflexion`，`memory.top_k=2`。
+4. `tau_retail_nt_memevo_candidate.yaml`：`memory.method=nt_memevo_candidate`，`memory.top_k=0`。
+5. `tau_retail_nt_memevo_gate.yaml`：`memory.method=nt_memevo_gate`，`memory.top_k=2`，`gate.min_precondition=0.25`，`gate.reject_negative_evidence=true`。
+
+### 输出目录
+
+1. `runs/tau_retail_nomem_seed1/`
+2. `runs/tau_retail_raw_trace_rag_seed1/`
+3. `runs/tau_retail_reflexion_seed1/`
+4. `runs/tau_retail_nt_memevo_candidate_seed1/`
+5. `runs/tau_retail_nt_memevo_gate_seed1/`
+
+### 结果
+
+`python -m pytest` 结果：
+
+```text
+22 passed in 0.09s
+```
+
+五组 tau-retail smoke baseline 的关键结果如下：
+
+| config | success_rate | memory_policy | memory_size | memory_top_k | avg_prompt_tokens | gate_decision_count | gate_accepted_count | gate_rejected_count | negative_transfer_rate |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tau_retail_nomem.yaml` | 1.0 | `none` | 0 | 0 | 858.0 | 0 | 0 | 0 | 0.0 |
+| `tau_retail_raw_trace_rag.yaml` | 1.0 | `raw_trace_rag` | 3 | 2 | 1117.3333333333333 | 0 | 0 | 0 | 0.0 |
+| `tau_retail_reflexion.yaml` | 1.0 | `reflexion` | 3 | 2 | 1381.3333333333333 | 0 | 0 | 0 | 0.0 |
+| `tau_retail_nt_memevo_candidate.yaml` | 1.0 | `nt_memevo_candidate` | 3 | 0 | 858.0 | 0 | 0 | 0 | 0.0 |
+| `tau_retail_nt_memevo_gate.yaml` | 1.0 | `nt_memevo_gate` | 3 | 2 | 858.0 | 3 | 0 | 3 | 0.0 |
+
+`tau_retail_nt_memevo_gate.yaml` 的拒绝原因：
+
+```json
+{"precondition_below_threshold": 3}
+```
+
+### 日志抽查
+
+1. `runs/tau_retail_raw_trace_rag_seed1/memory_updates.jsonl` 同时包含 `retrieve` 和 `add` 事件，第三个任务检索到两条历史 raw trace memory。
+2. `runs/tau_retail_reflexion_seed1/memories.jsonl` 生成 3 条 `reflection_type=strategy` 的 reflection memory。
+3. `runs/tau_retail_nt_memevo_candidate_seed1/candidate_memories.jsonl` 中三条 candidate 的 `scope.intent` 分别为 `customer_lookup`、`order_lookup` 和 `product_lookup`。
+4. `runs/tau_retail_nt_memevo_gate_seed1/memory_updates.jsonl` 中 3 条 `gate_decision` 全部为 `reject`，`runs.jsonl` 中三条任务的 `used_memory_ids` 均为空。
+
+### 现象与问题
+
+1. `none < raw_trace_rag < reflexion` 的 prompt token 成本顺序在 tau-retail smoke 上成立，说明真实工具描述和记忆注入成本已经显现。
+2. `nt_memevo_candidate` 与 `none` 的 prompt token 成本一致，符合当前候选记忆只写入、不注入的设计。
+3. `nt_memevo_gate` 在本次 smoke 中拒绝全部跨 intent memory，说明第十一轮的保守 gate 在 tau-retail smoke 上没有引入误注入。
+4. 当前 smoke split 每个 intent 只出现一次，因此 gate 只验证了跨 intent rejection，没有验证同 intent accepted path。
+
+### 下一步
+
+第一阶段的收口方向已经明确收敛到真实或导出的 tau-bench retail 小样本，后续不再继续扩展 smoke fixture。第十二轮应至少跑通 `no-memory + 一个 memory baseline`，并在 `tasks.jsonl`、`runs.jsonl`、`trace_events.jsonl`、`memory` 和 `metrics.json` 中稳定输出；如果真实数据暂不可用，则必须给出 local export schema、DB 文件要求、工具缺口和 blocker，作为第一阶段收口材料。

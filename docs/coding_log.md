@@ -769,3 +769,260 @@ head -n 3 runs/tiny_nt_memevo_gate_verify_seed1/candidate_memories.jsonl
 5. 先跑极小任务数，例如 `max_tasks=1` 或 `max_tasks=3`，验证 `tasks.jsonl`、`runs.jsonl`、`trace_events.jsonl`、`metrics.json` 都能生成。
 6. 保持第九轮 tiny 全部配置不回归，尤其是 `tiny_nt_memevo_gate_refine.yaml` 的 `memory_refinement_count=1` 和 unsafe polluted 的 `negative_transfer_rate=1.0`。
 7. 若 tau-bench adapter 的外部依赖过重，本轮至少完成 adapter 接口、配置、错误提示、文档和跳过式测试；真实任务运行步骤写入实验日志，等待环境准备后复验。
+
+## 2026-05-02 第一阶段第十轮
+
+目标：接入 tau-bench retail 的最小 adapter，使项目不再只有 tiny fixture；先用本地 retail smoke split 跑通 `tasks/runs/trace/metrics` 统一日志，并为后续真实 tau-bench 数据路径预留清晰入口和错误提示。
+
+已完成：
+
+1. 重写 `src/ntmemevo/envs/tau_bench.py`，实现 `TauBenchEnv` 的 retail 最小 adapter，不强依赖外部 tau-bench 包。
+2. 支持从本地 `.json`、`.jsonl`、`.py` task 文件加载 tau-bench retail 任务；也支持 `benchmark.task_module` 或已安装 tau-bench 包中的 task module。
+3. 将 tau task record 统一转换为项目内 `Task`，保留 `benchmark=tau_bench`、`domain=retail`、`intent`、`tool_names`、`expected_actions` 和 `no_memory_success` 等 metadata。
+4. 新增 retail DB loader，支持 `benchmark.data_file`、`benchmark.data_dir`，以及可选的 `tau_bench.envs.retail.data.load_data()`。
+5. 新增 retail tool wrapper：`find_user_id_by_name_zip`、`find_user_id_by_email`、`get_user_details`、`get_order_details`、`get_product_details`、`list_all_product_types`、`lookup_policy`、`calculate`、`think`、`transfer_to_human_agents` 以及 pending/delivered order mutation 类工具的最小实现。
+6. 新增 evaluator 映射：`evaluation=auto` 时优先使用 `expected_answer_contains`，否则可使用 `tool_sequence/action_sequence` 对比工具调用序列；统一返回 `success`、`reward` 和 `error_type`。
+7. 扩展 `MockLLMClient`，支持 tau-retail smoke 任务中的 customer/order/product/policy 工具选择，使无 API key 环境也能跑通 tau adapter smoke。
+8. 新增本地 smoke fixtures：`data/task_splits/tau_retail_smoke_tasks.json` 和 `data/tau_bench/retail_smoke_db.json`。
+9. 更新 `configs/tau_retail_nomem.yaml`，默认运行本地 3 条 tau-retail smoke 任务，输出到 `runs/tau_retail_nomem_seed1/`。
+10. 新增 `tests/test_tau_bench_adapter.py`，覆盖 tau-retail smoke pipeline、缺失 split 的明确错误提示、以及 action-sequence evaluator。
+11. 更新 `README.md`，加入 tau-retail smoke 命令、本地 fixture 路径、真实 tau-bench 数据接入方式和下一阶段方向。
+12. 新增实验日志模板，等待用户在目标 Linux + conda `rm` 环境完整复验后填写结果。
+
+关键实现说明：
+
+1. 第十轮没有引入 tau-bench 作为强依赖，避免破坏现有离线 tiny 测试；真实 tau-bench 数据可通过本地导出的 task/data 文件接入。
+2. adapter 当前以 retail smoke 和小样本真实任务为目标，mutation 工具只实现最小状态更新和错误返回；官方复杂 evaluator 仍需在后续轮次对齐。
+3. `evaluation=auto` 适合 smoke 和自然语言答案检查；真实 tau-bench 主实验建议在导出 expected actions 后使用 `evaluation=tool_sequence` 或接入官方 evaluator。
+4. 缺失 `split_file` 或 `data_file/data_dir` 时会报出带 `benchmark.split_file`、`benchmark.data_file`、`benchmark.data_dir` 的明确错误，方便实验机配置。
+
+验证记录：
+
+1. `python -m py_compile src/ntmemevo/envs/tau_bench.py src/ntmemevo/llm/client.py` 通过。
+2. `python -m pytest tests/test_tau_bench_adapter.py -q` 通过，结果为 `3 passed in 0.03s`。
+3. `python -m pytest -q` 通过，结果为 `18 passed in 0.08s`。
+4. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml` 成功。
+5. tau-retail smoke 结果：`num_tasks=3`、`success_rate=1.0`、`avg_reward=1.0`、`avg_tool_calls=1.0`、`memory_policy=none`、`memory_size=0`、`negative_transfer_rate=0.0`、`verification_count=0`。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml
+cat runs/tau_retail_nomem_seed1/metrics.json
+head -n 3 runs/tau_retail_nomem_seed1/tasks.jsonl
+tail -n 3 runs/tau_retail_nomem_seed1/runs.jsonl
+grep '"event_type": "tool_call"' runs/tau_retail_nomem_seed1/trace_events.jsonl
+```
+
+真实 tau-bench 数据接入建议：
+
+1. 将真实 retail task split 导出为 JSON/JSONL/Python 文件，并在配置中设置：
+
+```yaml
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: /path/to/tau_retail_tasks.json
+  data_file: /path/to/tau_retail_db.json
+  evaluation: auto
+  max_tasks: 1
+```
+
+2. 若已有已安装 tau-bench 包，可尝试：
+
+```yaml
+benchmark:
+  name: tau_bench
+  domain: retail
+  task_module: tau_bench.envs.retail.tasks
+  task_split: train
+  data_dir: /path/to/retail_data_dir
+  evaluation: tool_sequence
+  max_tasks: 1
+```
+
+3. 先用 `max_tasks=1` 或 `max_tasks=3` 验证 `tasks.jsonl`、`runs.jsonl`、`trace_events.jsonl` 和 `metrics.json`，再扩展到 `none / raw_trace_rag / reflexion / nt_memevo_candidate / nt_memevo_gate` 小样本对照。
+
+当前边界：
+
+1. 本轮只完成 tau-bench retail 最小 adapter 和本地 smoke，不声称已经完整复现官方 tau-bench retail benchmark。
+2. 官方 tau-bench 的复杂状态机、完整 retail tool semantics、policy violation evaluator 和终态 evaluator 尚未完全接入。
+3. 当前 mock agent 只覆盖 smoke 任务的确定性工具选择；真实 tau-bench 任务需要 OpenAI/其他真实模型或更强的本地 actor。
+4. 现有 NT-MemEvo gate/replay/verification 机制还没有在真实 tau-bench split 上跑完整对照；第十轮只是把真实 benchmark 入口和统一日志链路打通。
+
+下一步建议：
+
+1. 在目标实验机准备真实 tau-bench retail 数据，先跑 `max_tasks=1/3` 的 no-memory smoke，并把失败样例补充到 adapter 工具语义。
+2. 把 `raw_trace_rag`、`reflexion`、`nt_memevo_candidate`、`nt_memevo_gate` 依次迁移到 tau-retail 小样本配置，确认日志字段不变。
+3. 对齐官方 tau-bench evaluator，优先支持 action sequence / state diff / policy violation 三类评估。
+4. 构造 tau-retail support pool，把第八/九轮 support verification 与 scope refinement 迁移到真实任务。
+
+用户复验记录：
+
+1. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下运行 `python -m pytest`，环境为 Python 3.12.13、pytest 9.0.3、pluggy 1.6.0，结果为 `18 passed in 0.10s`。
+2. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml` 成功。
+3. tau-retail smoke 指标为：`num_tasks=3`、`success_rate=1.0`、`avg_reward=1.0`、`avg_steps=2.0`、`avg_prompt_tokens=858.0`、`avg_completion_tokens=110.66666666666667`、`avg_tool_calls=1.0`。
+4. no-memory / no-replay / no-verification 指标符合预期：`memory_policy=none`、`memory_size=0`、`memory_top_k=0`、`negative_transfer_rate=0.0`、`gate_decision_count=0`、`utility_update_count=0`、`replay_result_count=0`、`verification_count=0`。
+5. 用户检查 `tasks.jsonl`，确认三条 smoke task 都带有 `metadata.benchmark=tau_bench`、`domain=retail`、`intent`、`tool_names`、`expected_actions` 和 `no_memory_success=true`。
+6. 用户检查 `runs.jsonl`，确认三条任务均 `success=true`、`reward=1.0`、`tool_calls=1`、`used_memory_ids=[]`。
+7. 用户检查 `trace_events.jsonl`，确认三条 `tool_call` 分别为 `find_user_id_by_name_zip`、`get_order_details` 和 `get_product_details`，且 `ok=true`。
+
+第十轮结果分析：
+
+1. tau-retail 最小 adapter 的核心验收通过：本地 task loader、retail DB wrapper、ReAct agent、evaluator 映射和统一日志协议可以在目标 Linux 环境中串起来。
+2. 该结果只证明 smoke 级接入可用，不等同于官方 tau-bench retail 完整复现；当前任务数量为 3，且由 mock actor 的确定性规则解决。
+3. `avg_prompt_tokens=858.0` 明显高于 tiny no-memory 的 `310.4`，说明真实工具环境的 tool description 成本已经开始显现；后续 tau-retail baseline 必须单独记录 token / tool cost。
+4. `tasks.jsonl` 中已经保留 `intent`、`tool_names` 和 `expected_actions`，这对第十一轮迁移 gate / replay / support selection 是关键基础。
+5. 第十轮没有触发 memory、gate、utility、replay 或 verification 字段，这是 no-memory smoke 的正常结果；下一轮需要验证这些字段在 tau-retail 小样本上是否仍按 tiny 协议写出。
+
+第一阶段收口判断：
+
+1. 代码主链已经基本具备收口条件：tiny 上的 memory evolution 闭环已覆盖 candidate schema、risk gate、online utility、leave-one-memory-out replay、support-set verification、scope refinement 和 unique-execution 成本统计；tau-retail adapter 也已通过 no-memory smoke。
+2. 实验主链还不应立即收口，因为第十轮只跑了 tau-retail no-memory smoke，尚未证明 `raw_trace_rag`、`reflexion`、`nt_memevo_candidate` 和 `nt_memevo_gate` 在 tau-retail 任务上保持统一日志协议。
+3. 按严格验收口径，第一阶段还需要 **2 轮** 编码与实验即可收口；若真实 tau-bench 数据暂不可用，第十二轮可以先以导出的本地小样本或更强错误提示作为阶段收口边界，但需要在日志中明确 blocker。
+
+第一阶段剩余轮次方向：
+
+1. 第一阶段第十一轮：tau-retail smoke 多 baseline 迁移。
+   - 编码方向：新增 `configs/tau_retail_raw_trace_rag.yaml`、`configs/tau_retail_reflexion.yaml`、`configs/tau_retail_nt_memevo_candidate.yaml` 和 `configs/tau_retail_nt_memevo_gate.yaml`；必要时扩展 `CandidateMemoryExtractor` 对 tau-retail 工具名、intent 和 trace summary 的识别；新增测试覆盖 tau-retail memory 写入、检索、gate 决策和不破坏 tiny 回归。
+   - 实验方向：在本地 smoke 上运行 `none / raw_trace_rag / reflexion / nt_memevo_candidate / nt_memevo_gate`，检查 `memories.jsonl`、`candidate_memories.jsonl`、`memory_updates.jsonl`、`runs.jsonl` 和 `metrics.json` 字段完整性。
+   - 建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_reflexion.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_candidate.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_gate.yaml
+```
+
+2. 第一阶段第十二轮：真实或导出 tau-bench retail 小样本收口。
+   - 编码方向：对齐真实 tau-bench task/data 格式，补齐缺失 retail tool wrapper；若能拿到官方 evaluator，则接入 action sequence / state diff / policy violation 的最小映射；如果官方依赖不可用，则提供明确的 local export 规范和错误提示。
+   - 实验方向：用 `max_tasks=1/3` 先跑 no-memory，再跑一个 memory baseline；验收重点不是成功率，而是 `tasks/runs/trace/memory/replay/metrics` 是否能稳定生成、失败是否可解释、tool/evaluator 缺口是否记录。
+   - 建议命令模板：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_real_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_real_raw_trace_rag.yaml
+cat runs/tau_retail_real_nomem_seed1/metrics.json
+tail -n 5 runs/tau_retail_real_nomem_seed1/runs.jsonl
+grep '"event_type": "tool_call"' runs/tau_retail_real_nomem_seed1/trace_events.jsonl
+```
+
+第一阶段最终收口标准：
+
+1. `python -m pytest` 全量通过。
+2. tiny 全部核心配置仍不回归，尤其是 `tiny_nt_memevo_gate_refine.yaml` 的 `memory_refinement_count=1` 和 unsafe polluted 的 `negative_transfer_rate=1.0`。
+3. tau-retail smoke 至少覆盖 `none / raw_trace_rag / reflexion / nt_memevo_candidate / nt_memevo_gate` 五组配置，并生成统一日志。
+4. 真实或导出的 tau-bench retail 小样本至少跑通 no-memory 与一个 memory baseline；若外部数据暂不可用，必须有明确 blocker、export schema 和复验命令。
+5. `docs/coding_log.md` 与 `docs/experiment_log.md` 记录完整复验结果、失败边界和第二阶段入口。
+
+## 2026-05-02 第一阶段第十一轮
+
+目标：落实 tau-retail smoke 多 baseline 迁移，把第十轮只覆盖 no-memory 的本地 tau-retail adapter 扩展到 `raw_trace_rag`、`reflexion`、`nt_memevo_candidate` 和 `nt_memevo_gate`，并确认 memory / gate / metrics 日志协议在 tau-retail 小样本上不回归。
+
+已完成：
+
+1. 新增配置 `configs/tau_retail_raw_trace_rag.yaml`，在本地 tau-retail smoke split 上启用 Raw Trace RAG，输出目录为 `runs/tau_retail_raw_trace_rag_seed1/`。
+2. 新增配置 `configs/tau_retail_reflexion.yaml`，在同一 smoke split 上启用 Reflexion baseline，输出目录为 `runs/tau_retail_reflexion_seed1/`。
+3. 新增配置 `configs/tau_retail_nt_memevo_candidate.yaml`，在 tau-retail smoke 上写入结构化 candidate memory，输出目录为 `runs/tau_retail_nt_memevo_candidate_seed1/`。
+4. 新增配置 `configs/tau_retail_nt_memevo_gate.yaml`，在 tau-retail smoke 上运行风险感知 gate，输出目录为 `runs/tau_retail_nt_memevo_gate_seed1/`。
+5. 扩展 `CandidateMemoryExtractor`：优先使用 `task.metadata.intent`，使 tau-retail candidate scope 保留 `customer_lookup`、`order_lookup` 和 `product_lookup`；同时扩展 fallback intent 与 identifier 抽取，覆盖 customer/email/zip/product/return 等 retail 表达。
+6. 扩展 `RetrieverGate`：优先使用 `task.metadata.intent` 做 precondition 匹配，避免 tau-retail smoke 中 customer/order/product 跨 intent 记忆被误注入；同时保持无 metadata 的 tiny fallback 仍使用旧的 `order_status`，不破坏第八/九轮 support verification。
+7. 扩展 `MockLLMClient._decide_from_retrieved_memory()`，使 memory-hint 解析除 tiny tools 外也能识别 tau-retail smoke 工具，如 `find_user_id_by_name_zip`、`get_order_details` 和 `get_product_details`。
+8. 扩展 `tests/test_tau_bench_adapter.py`：新增 tau-retail `raw_trace_rag`、`reflexion`、`nt_memevo_candidate` 三组 baseline 的 memory 写入/检索日志测试；新增 `nt_memevo_gate` 对跨 intent candidate 全部拒绝的 gate 日志测试。
+9. 更新 `README.md`，加入 tau-retail 五组 smoke baseline 命令，并把下一轮方向收敛到真实或导出 tau-bench retail 小样本收口。
+10. 更新 `docs/experiment_log.md` 第十一轮实验模板，等待用户在 Linux + conda `rm` 环境完成完整复验后填写实际结果。
+
+关键实现说明：
+
+1. tau-retail candidate scope 现在以 task metadata 为准；本地 smoke 三条任务分别生成 `customer_lookup`、`order_lookup` 和 `product_lookup`，不会被统一折叠成 `general_tool_use`。
+2. `nt_memevo_gate` 在当前 smoke split 中没有 accepted path 是预期行为：三条任务 intent 不同，gate 应保守拒绝跨 intent candidate，防止 customer lookup 经验注入 order/product lookup。
+3. raw/reflexion 的检索仍是词法 baseline，会在 smoke 第 2/3 个任务检索到历史轨迹或反思；mock actor 默认不跟随 memory hints，因此成功率保持 1.0，差异主要体现在 prompt token 成本。
+4. 第十一轮没有启用 tau-retail replay、support verification 或 scope refinement；这些机制仍由 tiny 配置覆盖，tau-retail 上先验证五组 baseline 的统一日志协议。
+
+验证记录：
+
+1. `PYTHONPATH=src python -m pytest tests/test_tau_bench_adapter.py -q` 通过，结果为 `7 passed in 0.06s`。
+2. `PYTHONPATH=src python -m pytest -q` 通过，结果为 `22 passed in 0.10s`。
+3. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml` 成功：`num_tasks=3`、`success_rate=1.0`、`memory_policy=none`、`memory_size=0`、`avg_prompt_tokens=858.0`。
+4. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_raw_trace_rag.yaml` 成功：`num_tasks=3`、`success_rate=1.0`、`memory_policy=raw_trace_rag`、`memory_size=3`、`memory_top_k=2`、`avg_prompt_tokens=1117.3333333333333`。
+5. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_reflexion.yaml` 成功：`num_tasks=3`、`success_rate=1.0`、`memory_policy=reflexion`、`memory_size=3`、`memory_top_k=2`、`avg_prompt_tokens=1381.3333333333333`。
+6. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_candidate.yaml` 成功：`num_tasks=3`、`success_rate=1.0`、`memory_policy=nt_memevo_candidate`、`memory_size=3`、`memory_top_k=0`、`candidate_memory_count=3`、`active_memory_count=0`。
+7. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_gate.yaml` 成功：`num_tasks=3`、`success_rate=1.0`、`memory_policy=nt_memevo_gate`、`memory_size=3`、`memory_top_k=2`、`gate_decision_count=3`、`gate_accepted_count=0`、`gate_rejected_count=3`、`gate_rejection_reasons={"precondition_below_threshold": 3}`、`utility_update_count=0`。
+8. 抽查 `runs/tau_retail_nt_memevo_candidate_seed1/candidate_memories.jsonl`，确认三条 candidate scope intent 分别为 `customer_lookup`、`order_lookup` 和 `product_lookup`，tool_names 分别对应 `find_user_id_by_name_zip`、`get_order_details`、`get_product_details`。
+9. 抽查 `runs/tau_retail_nt_memevo_gate_seed1/memory_updates.jsonl`，确认 3 条 `gate_decision` 均为 `reject`，拒绝原因均为 `precondition_below_threshold`；三条主任务 `used_memory_ids=[]`。
+10. 抽查 `runs/tau_retail_raw_trace_rag_seed1/memory_updates.jsonl`，确认存在逐轮 `retrieve` 与 `add` 事件，第三个任务检索到两条 raw trace memory。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_reflexion.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_candidate.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_gate.yaml
+
+cat runs/tau_retail_raw_trace_rag_seed1/metrics.json
+cat runs/tau_retail_reflexion_seed1/metrics.json
+cat runs/tau_retail_nt_memevo_candidate_seed1/metrics.json
+cat runs/tau_retail_nt_memevo_gate_seed1/metrics.json
+
+head -n 3 runs/tau_retail_raw_trace_rag_seed1/memories.jsonl
+head -n 3 runs/tau_retail_reflexion_seed1/memories.jsonl
+head -n 3 runs/tau_retail_nt_memevo_candidate_seed1/candidate_memories.jsonl
+grep '"event_type": "gate_decision"' runs/tau_retail_nt_memevo_gate_seed1/memory_updates.jsonl
+tail -n 3 runs/tau_retail_nt_memevo_gate_seed1/runs.jsonl
+```
+
+实验日志填写建议：
+
+1. 新增 `tau_retail_multi_baseline_smoke_seed1` 或分别新增四个 tau-retail baseline 条目，记录五组配置的 `success_rate`、`memory_policy`、`memory_size`、`memory_top_k`、`avg_prompt_tokens`、`gate_decision_count` 和 `gate_rejection_reasons`。
+2. 重点记录 token 成本趋势：`none=858.0`，`raw_trace_rag=1117.3333333333333`，`reflexion=1381.3333333333333`，candidate/gate 在未注入 memory 时与 none 一致。
+3. 对 `tau_retail_nt_memevo_candidate_seed1`，记录 candidate scope intent 是否为 `customer_lookup/order_lookup/product_lookup`。
+4. 对 `tau_retail_nt_memevo_gate_seed1`，记录 gate 全部拒绝跨 intent memory，说明第十一轮保守 gate 在真实工具任务 smoke 上未产生负迁移。
+
+当前边界：
+
+1. tau-retail 仍使用本地 3 条 smoke fixture，不代表官方 tau-bench retail 完整 benchmark。
+2. 当前 smoke split 每个 intent 只出现一次，因此 `nt_memevo_gate` 只验证 cross-intent rejection，没有验证 tau-retail 同 intent accepted path、utility update、replay 或 verification。
+3. raw/reflexion 的成功率不代表方法收益；mock actor 不依赖 memory 即可完成三条 smoke 任务，memory 主要用于验证日志字段和 token 成本。
+4. 官方 tau-bench evaluator、复杂 mutation tools、policy violation、state diff 和真实 support pool 仍需第十二轮或第二阶段继续接入。
+
+下一步建议：
+
+1. 第一阶段第十二轮应接入真实或导出的 tau-bench retail 小样本，至少跑通 `tau_retail_real_nomem` 与一个 memory baseline。
+2. 若真实数据暂不可用，应提供本地 export schema、示例任务字段、DB 文件结构、明确 blocker 和复验命令，作为第一阶段收口边界。
+3. 对真实小样本优先补齐缺失工具和 evaluator 映射，不急于打开 replay / verification；先保证 `tasks/runs/trace/memory/metrics` 稳定生成。
+
+用户复验记录：
+
+1. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下运行 `python -m pytest`，环境为 Python 3.12.13、pytest 9.0.3、pluggy 1.6.0，结果为 `22 passed in 0.09s`。
+2. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nomem.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=858.0`、`memory_policy=none`、`memory_size=0`、`negative_transfer_rate=0.0`、`gate_decision_count=0`。
+3. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_raw_trace_rag.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=1117.3333333333333`、`memory_policy=raw_trace_rag`、`memory_size=3`、`memory_top_k=2`、`negative_transfer_rate=0.0`。
+4. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_reflexion.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=1381.3333333333333`、`memory_policy=reflexion`、`memory_size=3`、`memory_top_k=2`、`negative_transfer_rate=0.0`。
+5. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_candidate.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=858.0`、`memory_policy=nt_memevo_candidate`、`memory_size=3`、`memory_top_k=0`、`candidate_memory_count=3`、`active_memory_count=0`。
+6. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_gate.yaml`，结果为 `success_rate=1.0`、`avg_prompt_tokens=858.0`、`memory_policy=nt_memevo_gate`、`memory_size=3`、`memory_top_k=2`、`gate_decision_count=3`、`gate_accepted_count=0`、`gate_rejected_count=3`、`gate_rejection_reasons={"precondition_below_threshold": 3}`、`negative_transfer_rate=0.0`。
+7. 用户抽查 `runs/tau_retail_nt_memevo_candidate_seed1/candidate_memories.jsonl`，确认三条 candidate scope intent 分别为 `customer_lookup`、`order_lookup` 和 `product_lookup`，且 `positive_evidence`、`action_hint`、`preconditions` 与 smoke 任务匹配。
+8. 用户抽查 `runs/tau_retail_nt_memevo_gate_seed1/memory_updates.jsonl`，确认 3 条 `gate_decision` 全部为 `reject`，拒绝原因均为 `precondition_below_threshold`，三条主任务 `used_memory_ids=[]`。
+9. 用户抽查 `runs/tau_retail_raw_trace_rag_seed1/memory_updates.jsonl` 与 `runs/tau_retail_reflexion_seed1/memories.jsonl`，确认 raw trace 逐轮写入 `retrieve/add` 事件，reflexion 逐轮写入 3 条 `reflection_type=strategy` memory。
+
+第一阶段收口方向（更新）：
+
+1. tau-retail smoke baseline 已完成五组对照验收，后续不再扩展 smoke 级别的横向工作面。
+2. 第一阶段的剩余唯一工作面是真实或导出的 tau-bench retail 小样本收口，要求至少跑通 `no-memory + 一个 memory baseline`，并稳定生成 `tasks.jsonl`、`runs.jsonl`、`trace_events.jsonl`、`memory` 和 `metrics`。
+3. 如果真实 tau-bench retail 数据暂不可用，就把收口边界明确写成 local export schema、DB 文件要求、工具缺口和 blocker，不再继续增加 smoke fixture。

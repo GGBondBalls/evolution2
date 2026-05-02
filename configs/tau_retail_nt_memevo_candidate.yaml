@@ -1,7 +1,7 @@
 experiment:
-  name: tau_retail_nomem_seed1
+  name: tau_retail_nt_memevo_candidate_seed1
   seed: 1
-  output_dir: runs/tau_retail_nomem_seed1
+  output_dir: runs/tau_retail_nt_memevo_candidate_seed1
 
 benchmark:
   name: tau_bench
@@ -22,6 +22,16 @@ models:
     model: mock-tool-agent
     temperature: 0.0
     max_tokens: 2048
+
+memory:
+  method: nt_memevo_candidate
+  top_k: 0
+  save_successes: true
+  save_failures: true
+  extractor_model: deterministic_candidate_extractor_v1
+  domain: retail
+  ttl: 50
+  max_claim_chars: 700
 
 logging:
   save_raw_model_io: true
