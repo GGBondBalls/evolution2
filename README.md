@@ -109,6 +109,13 @@ python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_
 python -m ntmemevo.experiments.run_stream --config configs/tau_retail_nt_memevo_gate.yaml
 ```
 
+Phase-one tau-retail real/export sample closure:
+
+```powershell
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_real_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_real_raw_trace_rag.yaml
+```
+
 `configs/tau_retail_nomem.yaml` uses local smoke fixtures by default:
 
 ```text
@@ -116,10 +123,22 @@ data/task_splits/tau_retail_smoke_tasks.json
 data/tau_bench/retail_smoke_db.json
 ```
 
-To run against a real tau-bench retail checkout or exported split, set `benchmark.split_file`
-to a local JSON/JSONL/Python task file and set `benchmark.data_file` or `benchmark.data_dir`
-to retail data. The adapter also accepts `benchmark.task_module` or an installed tau-bench
-package with task modules. Missing task/data paths raise explicit setup errors.
+`configs/tau_retail_real_nomem.yaml` and
+`configs/tau_retail_real_raw_trace_rag.yaml` use the versioned export-format sample:
+
+```text
+data/task_splits/tau_retail_export_sample_tasks.py
+data/tau_bench/retail_export_sample/db.json
+```
+
+To run against a real tau-bench retail checkout or exported split, set
+`benchmark.split_file` to a local JSON/JSONL/Python task file and set
+`benchmark.data_file` or `benchmark.data_dir` to retail data. The adapter also
+accepts `benchmark.task_module` or an installed tau-bench package with task modules.
+Use `benchmark.validate_export_schema=true` for exported files so missing task
+outcomes or malformed DB sections fail before the agent loop starts. The expected
+local export format is documented in `docs/tau_retail_export_schema.md`. Missing
+task/data paths raise explicit setup errors.
 
 or:
 

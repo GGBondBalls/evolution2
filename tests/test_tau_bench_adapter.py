@@ -263,6 +263,132 @@ def test_tau_retail_nt_memevo_gate_logs_cross_intent_rejections(tmp_path: Path) 
     assert any(record["event_type"] == "candidate_extract" for record in update_records)
 
 
+def test_tau_retail_export_sample_loads_python_tasks_and_data_dir() -> None:
+    env = TauBenchEnv(
+        {
+            "domain": "retail",
+            "split_file": "data/task_splits/tau_retail_export_sample_tasks.py",
+            "data_dir": "data/tau_bench/retail_export_sample",
+            "evaluation": "auto",
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+
+    tasks = env.load_tasks(max_tasks=3)
+
+    assert [task.task_id for task in tasks] == [
+        "tau_retail_0001",
+        "tau_retail_0002",
+        "tau_retail_0003",
+    ]
+    assert [task.metadata["intent"] for task in tasks] == [
+        "customer_lookup",
+        "order_lookup",
+        "product_lookup",
+    ]
+
+    user_result = env.call_tool(
+        "find_user_id_by_name_zip",
+        {"first_name": "Yusuf", "last_name": "Rossi", "zip": "19122"},
+    )
+    order_result = env.call_tool("get_order_details", {"order_id": "W2378156"})
+
+    assert user_result.ok
+    assert "user_id=user_1" in user_result.observation
+    assert order_result.ok
+    assert "#W2378156" in order_result.observation
+
+
+def test_tau_retail_real_export_raw_trace_config_path_runs(tmp_path: Path) -> None:
+    split_file = Path("data/task_splits/tau_retail_export_sample_tasks.py").resolve()
+    data_dir = Path("data/tau_bench/retail_export_sample").resolve()
+    output_dir = tmp_path / "runs" / "tau_retail_real_raw_trace"
+    config_path = tmp_path / "tau_retail_real_raw_trace.yaml"
+    config_path.write_text(
+        f"""
+experiment:
+  name: tau_retail_real_raw_trace_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: {split_file.as_posix()}
+  data_dir: {data_dir.as_posix()}
+  evaluation: auto
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 2
+models:
+  actor:
+    provider: mock
+    model: mock-tool-agent
+    temperature: 0.0
+    max_tokens: 2048
+memory:
+  method: raw_trace_rag
+  top_k: 2
+  save_failures: true
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == 1.0
+    assert metrics["memory_policy"] == "raw_trace_rag"
+    assert metrics["memory_size"] == 3
+    assert metrics["memory_top_k"] == 2
+
+    task_records = [
+        json.loads(line)
+        for line in (output_dir / "tasks.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    memory_records = [
+        json.loads(line)
+        for line in (output_dir / "memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+    assert {record["metadata"]["intent"] for record in task_records} == {
+        "customer_lookup",
+        "order_lookup",
+        "product_lookup",
+    }
+    assert len(memory_records) == 3
+
+
+def test_tau_retail_export_schema_validation_reports_missing_outcome(tmp_path: Path) -> None:
+    tasks_path = tmp_path / "bad_tasks.json"
+    tasks_path.write_text(
+        json.dumps([{"id": "bad_task", "instruction": "This task has no expected outcome."}]),
+        encoding="utf-8",
+    )
+
+    env = TauBenchEnv(
+        {
+            "domain": "retail",
+            "split_file": str(tasks_path),
+            "data_dir": "data/tau_bench/retail_export_sample",
+            "evaluation": "auto",
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+
+    with pytest.raises(ValueError, match="expected_answer_contains"):
+        env.load_tasks()
+
+
 def test_tau_retail_missing_split_has_clear_error(tmp_path: Path) -> None:
     data_file = Path("data/tau_bench/retail_smoke_db.json").resolve()
     env = TauBenchEnv(

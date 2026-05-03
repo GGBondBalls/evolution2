@@ -1,0 +1,31 @@
+experiment:
+  name: tau_retail_real_nomem_seed1
+  seed: 1
+  output_dir: runs/tau_retail_real_nomem_seed1
+
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: data/task_splits/tau_retail_export_sample_tasks.py
+  data_dir: data/tau_bench/retail_export_sample
+  evaluation: auto
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 3
+
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 0
+
+models:
+  actor:
+    provider: mock
+    model: mock-tool-agent
+    temperature: 0.0
+    max_tokens: 2048
+
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
