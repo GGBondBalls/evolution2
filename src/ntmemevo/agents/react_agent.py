@@ -30,6 +30,10 @@ class ReActToolAgent(Agent):
         trace_logger: TraceLogger,
         memories: list[RetrievedMemory] | None = None,
     ) -> AgentResult:
+        start_task = getattr(env, "start_task", None)
+        if callable(start_task):
+            start_task(task)
+
         observations: list[str] = []
         trace_summary: list[str] = []
         memories = memories or []
@@ -109,6 +113,9 @@ class ReActToolAgent(Agent):
             final_answer = observations[-1] if observations else "No final answer."
 
         success, reward, eval_error = env.evaluate(task, final_answer)
+        evaluation_details = getattr(env, "last_evaluation_detail", {})
+        if not isinstance(evaluation_details, dict):
+            evaluation_details = {}
         error_type = error_type or eval_error
         return AgentResult(
             task_id=task.task_id,
@@ -122,6 +129,7 @@ class ReActToolAgent(Agent):
             used_memory_ids=tuple(memory.memory_id for memory in memories),
             trace_summary=tuple(trace_summary),
             error_type=error_type,
+            evaluation_details=dict(evaluation_details),
         )
 
     def _build_messages(

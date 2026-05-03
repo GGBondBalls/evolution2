@@ -46,6 +46,7 @@ class RunLogger:
             "used_memory_ids": list(result.used_memory_ids),
             "trace_summary": list(result.trace_summary),
             "error_type": result.error_type,
+            "evaluation_details": result.evaluation_details,
             "final_answer": result.final_answer,
         }
         self.append_jsonl("runs.jsonl", record)

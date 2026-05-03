@@ -1,0 +1,101 @@
+{
+  "users": [
+    {
+      "user_id": "user_phase2",
+      "first_name": "Mira",
+      "last_name": "Chen",
+      "name": "Mira Chen",
+      "email": "mira.chen@example.com",
+      "address": {
+        "city": "Seattle",
+        "state": "WA",
+        "zip": "98101"
+      },
+      "orders": ["#READ1001", "#PEND2001", "#PEND2002"]
+    }
+  ],
+  "orders": [
+    {
+      "order_id": "#READ1001",
+      "user_id": "user_phase2",
+      "status": "delivered",
+      "items": [
+        {
+          "item_id": "item_read_1",
+          "product_id": "SKU_PHASE2_HOODIE",
+          "name": "Phase Two Hoodie",
+          "quantity": 1
+        }
+      ],
+      "shipping_address": {
+        "city": "Seattle",
+        "state": "WA",
+        "zip": "98101"
+      },
+      "payment_method_id": "pm_phase2_1"
+    },
+    {
+      "order_id": "#PEND2001",
+      "user_id": "user_phase2",
+      "status": "pending",
+      "items": [
+        {
+          "item_id": "item_cancel_1",
+          "product_id": "SKU_PHASE2_MUG",
+          "name": "Phase Two Mug",
+          "quantity": 1
+        }
+      ],
+      "shipping_address": {
+        "city": "Seattle",
+        "state": "WA",
+        "zip": "98101"
+      },
+      "payment_method_id": "pm_phase2_1"
+    },
+    {
+      "order_id": "#PEND2002",
+      "user_id": "user_phase2",
+      "status": "pending",
+      "items": [
+        {
+          "item_id": "item_pend_1",
+          "product_id": "SKU_PHASE2_CAP",
+          "name": "Phase Two Cap",
+          "quantity": 1
+        }
+      ],
+      "shipping_address": {
+        "city": "Seattle",
+        "state": "WA",
+        "zip": "98101"
+      },
+      "payment_method_id": "pm_phase2_1"
+    }
+  ],
+  "products": [
+    {
+      "product_id": "SKU_PHASE2_HOODIE",
+      "name": "Phase Two Hoodie",
+      "type": "apparel",
+      "price": 48.0
+    },
+    {
+      "product_id": "SKU_PHASE2_MUG",
+      "name": "Phase Two Mug",
+      "type": "home",
+      "price": 18.0
+    },
+    {
+      "product_id": "SKU_PHASE2_CAP",
+      "name": "Phase Two Cap",
+      "type": "apparel",
+      "price": 22.0
+    }
+  ],
+  "policies": {
+    "return_window": "Delivered retail orders can be returned within 30 days if the item is unused.",
+    "cancellation_policy": "Pending orders can be cancelled before fulfillment.",
+    "exchange_policy": "Delivered apparel can be exchanged for an in-stock variant within 30 days."
+  }
+}

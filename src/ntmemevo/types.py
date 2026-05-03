@@ -57,6 +57,7 @@ class AgentResult:
     used_memory_ids: tuple[str, ...] = ()
     trace_summary: tuple[str, ...] = ()
     error_type: str | None = None
+    evaluation_details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -20,6 +20,7 @@ benchmark:
   split_file: data/task_splits/tau_retail_export_sample_tasks.py
   data_dir: data/tau_bench/retail_export_sample
   evaluation: auto
+  compare_action_args: false
   require_data: true
   validate_export_schema: true
   max_tasks: 3
@@ -70,12 +71,44 @@ Accepted action name keys: `name`, `tool_name`, `action`.
 
 Accepted action argument keys: `args`, `arguments`, `kwargs`.
 
+Accepted state-diff outcome keys: `expected_state_diff`, `state_diff`,
+`expected_db_state`.
+
 At least one expected outcome must be present:
 
 1. `expected_answer_contains` or `expected_answer`, used by
    `evaluation=answer_contains` and preferred by `evaluation=auto`.
 2. `actions` or `expected_actions`, used by `evaluation=tool_sequence`,
    `evaluation=action_sequence`, and as fallback by `evaluation=auto`.
+3. `expected_state_diff`, `state_diff`, or `expected_db_state`, used by
+   `evaluation=state_diff`, `evaluation=official_like`, and preferred by
+   `evaluation=auto`.
+
+For phase-two evaluator alignment, use `evaluation=official_like` and
+`compare_action_args=true`. `official_like` combines available expected answer,
+expected action, state-diff, and policy/precondition checks into one explainable
+reward path. It is still an adapter-level approximation, not the official
+tau-bench evaluator.
+
+State diff expectations use final-record fields. Example:
+
+```json
+{
+  "expected_state_diff": {
+    "orders": {
+      "#PEND2001": {
+        "status": "cancelled",
+        "cancel_reason": "customer_request"
+      }
+    }
+  }
+}
+```
+
+Expected actions may include `optional_args` / `optional_fields` and
+`ignore_args` / `ignore_fields`. When `compare_action_args=true`, order IDs are
+normalized with or without leading `#`, ID-like strings are case-insensitive, and
+list-valued args are compared order-insensitively.
 
 Recommended metadata:
 
@@ -173,15 +206,33 @@ Phase one implements the tools needed for smoke and small exported samples:
 16. `exchange_delivered_order_items`
 
 The mutation tools are minimal state updates, not a full official tau-bench
-retail simulator. For phase-one closure, use `max_tasks=1` or `max_tasks=3` and
-inspect failed tasks before expanding coverage.
+retail simulator. Phase two currently supports task-level DB reset, pending
+order modification/cancellation, delivered-order return/exchange preconditions,
+and evaluator detail logging. For real exports, use `max_tasks=1` or
+`max_tasks=3` and inspect failed tasks before expanding coverage.
+
+Tau-retail runs write per-task evaluator details to `runs.jsonl` under
+`evaluation_details`. Key fields include:
+
+1. `evaluation_mode`
+2. `answer_contains_passed`
+3. `expected_actions_matched`
+4. `action_mismatches`
+5. `state_diff_passed`
+6. `state_diff_summary`
+7. `state_diff_mismatches`
+8. `policy_violation_count`
+9. `policy_violations`
+10. `tool_semantic_error_count`
+11. `tool_semantic_errors`
 
 ## Known Blockers
 
 The following remain second-stage work:
 
 1. Full official tau-bench retail state machine parity.
-2. Official policy-violation and state-diff evaluator parity.
+2. Official policy-violation and state-diff evaluator parity beyond the local
+   `official_like` approximation.
 3. Real model experiments beyond the deterministic mock actor.
 4. Real tau-retail support pool construction for replay verification.
 5. Learned support selector, learned gate/ranker, and broader memory merge/split.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import importlib
 import json
 import operator
@@ -28,8 +29,30 @@ class TauBenchEnv(AgentEnv):
             )
         self.evaluation = str(config.get("evaluation", "auto")).lower()
         self.compare_action_args = bool(config.get("compare_action_args", False))
+        self.strict_action_args = bool(config.get("strict_action_args", False))
         self._tool_history: list[dict[str, Any]] = []
-        self.db = self._load_retail_db()
+        self._last_evaluation_detail: dict[str, Any] = {}
+        self._task_initial_db: dict[str, Any] | None = None
+        self.initial_db = self._load_retail_db()
+        self.db = copy.deepcopy(self.initial_db)
+
+    @property
+    def last_evaluation_detail(self) -> dict[str, Any]:
+        return dict(self._last_evaluation_detail)
+
+    def start_task(self, task: Task) -> None:
+        self.db = copy.deepcopy(self.initial_db)
+        self._task_initial_db = copy.deepcopy(self.db)
+        self._tool_history = []
+        self._last_evaluation_detail = {
+            "task_id": task.task_id,
+            "evaluation_requested": self.evaluation,
+            "evaluation_mode": None,
+            "state_diff_passed": None,
+            "expected_actions_matched": None,
+            "policy_violation_count": 0,
+            "tool_semantic_error_count": 0,
+        }
 
     def load_tasks(self, max_tasks: int | None = None) -> list[Task]:
         records = self._load_task_records()
@@ -62,56 +85,171 @@ class TauBenchEnv(AgentEnv):
         if not isinstance(args, dict):
             args = {}
         tool_name = str(tool_name)
-        self._tool_history.append({"tool_name": tool_name, "args": dict(args)})
-
+        result: ToolResult
         if tool_name == "find_user_id_by_name_zip":
-            return self._find_user_id_by_name_zip(args)
-        if tool_name == "find_user_id_by_email":
-            return self._find_user_id_by_email(args)
-        if tool_name == "get_user_details":
-            return self._get_user_details(args)
-        if tool_name == "get_order_details":
-            return self._get_order_details(args)
-        if tool_name == "get_product_details":
-            return self._get_product_details(args)
-        if tool_name == "list_all_product_types":
-            return self._list_all_product_types(args)
-        if tool_name == "lookup_policy":
-            return self._lookup_policy(args)
-        if tool_name == "calculate":
-            return self._calculate(args)
-        if tool_name == "think":
-            return ToolResult(tool_name, args, f"Noted: {args.get('thought', '')}")
-        if tool_name == "transfer_to_human_agents":
-            return ToolResult(tool_name, args, f"Transferred to human agents: {args.get('summary', '')}")
-        if tool_name == "modify_pending_order_address":
-            return self._modify_order(order_status="pending", field="address", args=args)
-        if tool_name == "modify_pending_order_payment":
-            return self._modify_order(order_status="pending", field="payment_method_id", args=args)
-        if tool_name == "modify_pending_order_items":
-            return self._modify_order(order_status="pending", field="items", args=args)
-        if tool_name == "cancel_pending_order":
-            return self._set_order_status(
-                tool_name=tool_name,
-                args=args,
-                required_status="pending",
-                new_status="cancelled",
+            result = self._find_user_id_by_name_zip(args)
+        elif tool_name == "find_user_id_by_email":
+            result = self._find_user_id_by_email(args)
+        elif tool_name == "get_user_details":
+            result = self._get_user_details(args)
+        elif tool_name == "get_order_details":
+            result = self._get_order_details(args)
+        elif tool_name == "get_product_details":
+            result = self._get_product_details(args)
+        elif tool_name == "list_all_product_types":
+            result = self._list_all_product_types(args)
+        elif tool_name == "lookup_policy":
+            result = self._lookup_policy(args)
+        elif tool_name == "calculate":
+            result = self._calculate(args)
+        elif tool_name == "think":
+            result = ToolResult(tool_name, args, f"Noted: {args.get('thought', '')}")
+        elif tool_name == "transfer_to_human_agents":
+            result = ToolResult(
+                tool_name,
+                args,
+                f"Transferred to human agents: {args.get('summary', '')}",
             )
-        if tool_name == "return_delivered_order_items":
-            return self._set_order_status(
+        elif tool_name == "modify_pending_order_address":
+            result = self._modify_order(
                 tool_name=tool_name,
+                order_status="pending",
+                field="shipping_address",
                 args=args,
-                required_status="delivered",
-                new_status="return_requested",
             )
-        if tool_name == "exchange_delivered_order_items":
-            return self._set_order_status(
+        elif tool_name == "modify_pending_order_payment":
+            result = self._modify_order(
                 tool_name=tool_name,
+                order_status="pending",
+                field="payment_method_id",
                 args=args,
-                required_status="delivered",
-                new_status="exchange_requested",
             )
-        return ToolResult(tool_name, args, f"Unknown tau-bench retail tool: {tool_name}", ok=False)
+        elif tool_name == "modify_pending_order_items":
+            result = self._modify_order(
+                tool_name=tool_name,
+                order_status="pending",
+                field="items",
+                args=args,
+            )
+        elif tool_name == "cancel_pending_order":
+            result = self._cancel_pending_order(args)
+        elif tool_name == "return_delivered_order_items":
+            result = self._return_delivered_order_items(args)
+        elif tool_name == "exchange_delivered_order_items":
+            result = self._exchange_delivered_order_items(args)
+        else:
+            result = ToolResult(tool_name, args, f"Unknown tau-bench retail tool: {tool_name}", ok=False)
+
+        self._tool_history.append(
+            {
+                "tool_name": result.tool_name,
+                "args": dict(args),
+                "ok": result.ok,
+                "observation": result.observation,
+            }
+        )
+        return result
+
+    def _cancel_pending_order(self, args: dict[str, Any]) -> ToolResult:
+        order_id = str(args.get("order_id") or "")
+        result = self._set_order_status(
+            tool_name="cancel_pending_order",
+            args=args,
+            required_status="pending",
+            new_status="cancelled",
+        )
+        if result.ok:
+            order = self._get_order_record(order_id)
+            if order is not None:
+                order["cancel_reason"] = str(args.get("reason") or "customer_request")
+        return result
+
+    def _return_delivered_order_items(self, args: dict[str, Any]) -> ToolResult:
+        order_id = str(args.get("order_id") or "")
+        item_ids = self._normalize_id_list(args.get("item_ids") or args.get("items") or args.get("item_id"))
+        order = self._get_order_record(order_id)
+        if not order:
+            return ToolResult(
+                "return_delivered_order_items",
+                args,
+                f"Order {self._clean_order_id(order_id)} was not found.",
+                ok=False,
+            )
+        current_status = str(order.get("status", "")).lower()
+        if current_status != "delivered":
+            return ToolResult(
+                "return_delivered_order_items",
+                args,
+                f"Order {self._clean_order_id(order_id)} is {current_status} and cannot return delivered items.",
+                ok=False,
+            )
+        missing = self._missing_item_ids(order, item_ids)
+        if missing:
+            return ToolResult(
+                "return_delivered_order_items",
+                args,
+                f"Order {self._clean_order_id(order_id)} does not contain item ids: {', '.join(missing)}.",
+                ok=False,
+            )
+        order["status"] = "return_requested"
+        order["return_item_ids"] = item_ids
+        self._mark_order_items(order, item_ids, "return_requested")
+        return ToolResult(
+            "return_delivered_order_items",
+            args,
+            f"Order {self._clean_order_id(order_id)} return requested for item_ids={item_ids}.",
+        )
+
+    def _exchange_delivered_order_items(self, args: dict[str, Any]) -> ToolResult:
+        order_id = str(args.get("order_id") or "")
+        item_ids = self._normalize_id_list(args.get("item_ids") or args.get("items") or args.get("item_id"))
+        product_ids = self._normalize_id_list(
+            args.get("product_ids") or args.get("replacement_product_ids") or args.get("product_id")
+        )
+        order = self._get_order_record(order_id)
+        if not order:
+            return ToolResult(
+                "exchange_delivered_order_items",
+                args,
+                f"Order {self._clean_order_id(order_id)} was not found.",
+                ok=False,
+            )
+        current_status = str(order.get("status", "")).lower()
+        if current_status != "delivered":
+            return ToolResult(
+                "exchange_delivered_order_items",
+                args,
+                f"Order {self._clean_order_id(order_id)} is {current_status} and cannot exchange delivered items.",
+                ok=False,
+            )
+        missing_items = self._missing_item_ids(order, item_ids)
+        if missing_items:
+            return ToolResult(
+                "exchange_delivered_order_items",
+                args,
+                f"Order {self._clean_order_id(order_id)} does not contain item ids: {', '.join(missing_items)}.",
+                ok=False,
+            )
+        missing_products = [product_id for product_id in product_ids if product_id not in self.db["products"]]
+        if missing_products:
+            return ToolResult(
+                "exchange_delivered_order_items",
+                args,
+                f"Products were not found for exchange: {', '.join(missing_products)}.",
+                ok=False,
+            )
+        order["status"] = "exchange_requested"
+        order["exchange_item_ids"] = item_ids
+        order["exchange_product_ids"] = product_ids
+        self._mark_order_items(order, item_ids, "exchange_requested")
+        return ToolResult(
+            "exchange_delivered_order_items",
+            args,
+            (
+                f"Order {self._clean_order_id(order_id)} exchange requested for "
+                f"item_ids={item_ids}; product_ids={product_ids}."
+            ),
+        )
 
     def evaluate(self, task: Task, final_answer: str) -> tuple[bool, float, str | None]:
         try:
@@ -243,10 +381,16 @@ class TauBenchEnv(AgentEnv):
             has_expected_answer = bool(self._normalize_expected_answer(expected))
             raw_actions = record.get("actions") or record.get("expected_actions")
             actions = self._normalize_actions(raw_actions)
-            if not has_expected_answer and not actions:
+            has_expected_state_diff = bool(
+                record.get("expected_state_diff")
+                or record.get("state_diff")
+                or record.get("expected_db_state")
+            )
+            if not has_expected_answer and not actions and not has_expected_state_diff:
                 raise ValueError(
                     f"Tau-bench export task {task_id!r} in {source} must provide either "
-                    "expected_answer_contains/expected_answer or actions/expected_actions."
+                    "expected_answer_contains/expected_answer, actions/expected_actions, "
+                    "or expected_state_diff/state_diff/expected_db_state."
                 )
             if raw_actions is not None and not actions:
                 raise ValueError(
@@ -349,7 +493,16 @@ class TauBenchEnv(AgentEnv):
             if not name:
                 continue
             args = action.get("args") or action.get("arguments") or action.get("kwargs") or {}
-            normalized.append({"name": str(name), "args": dict(args) if isinstance(args, dict) else {}})
+            optional_args = action.get("optional_args") or action.get("optional_fields") or []
+            ignore_args = action.get("ignore_args") or action.get("ignore_fields") or []
+            normalized.append(
+                {
+                    "name": str(name),
+                    "args": dict(args) if isinstance(args, dict) else {},
+                    "optional_args": list(optional_args) if isinstance(optional_args, list) else [],
+                    "ignore_args": list(ignore_args) if isinstance(ignore_args, list) else [],
+                }
+            )
         return normalized
 
     def _infer_intent(self, instruction: str, tool_names: Any) -> str:
@@ -586,26 +739,47 @@ class TauBenchEnv(AgentEnv):
             return ToolResult("calculate", args, str(exc), ok=False)
         return ToolResult("calculate", args, f"{expression} = {value}")
 
-    def _modify_order(self, order_status: str, field: str, args: dict[str, Any]) -> ToolResult:
+    def _modify_order(
+        self,
+        tool_name: str,
+        order_status: str,
+        field: str,
+        args: dict[str, Any],
+    ) -> ToolResult:
         order_id = str(args.get("order_id") or "")
         order = self._get_order_record(order_id)
         if not order:
             return ToolResult(
-                f"modify_pending_order_{field}",
+                tool_name,
                 args,
                 f"Order {self._clean_order_id(order_id)} was not found.",
                 ok=False,
             )
         if str(order.get("status", "")).lower() != order_status:
             return ToolResult(
-                f"modify_pending_order_{field}",
+                tool_name,
                 args,
                 f"Order {order_id} is {order.get('status')} and cannot be modified as {order_status}.",
                 ok=False,
             )
-        order[field] = args.get(field) or args.get("new_" + field) or args
+        if field == "shipping_address":
+            value = args.get("address") or args.get("shipping_address") or args.get("new_address")
+        elif field == "payment_method_id":
+            value = args.get("payment_method_id") or args.get("new_payment_method_id")
+        elif field == "items":
+            value = self._updated_order_items(order, args)
+        else:
+            value = args.get(field) or args.get("new_" + field) or args
+        if value is None:
+            return ToolResult(
+                tool_name,
+                args,
+                f"No update value was provided for {field}.",
+                ok=False,
+            )
+        order[field] = value
         return ToolResult(
-            f"modify_pending_order_{field}",
+            tool_name,
             args,
             f"Order {self._clean_order_id(order_id)} {field} updated.",
         )
@@ -641,6 +815,52 @@ class TauBenchEnv(AgentEnv):
             f"Order {self._clean_order_id(order_id)} status updated to {new_status}.",
         )
 
+    def _updated_order_items(self, order: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
+        product_ids = self._normalize_id_list(args.get("product_ids") or args.get("product_id"))
+        if not product_ids:
+            items = args.get("items")
+            if isinstance(items, list):
+                return [dict(item) for item in items if isinstance(item, dict)]
+            return list(order.get("items", []))
+        existing_items = [dict(item) for item in order.get("items", []) if isinstance(item, dict)]
+        updated: list[dict[str, Any]] = []
+        for index, product_id in enumerate(product_ids):
+            base = existing_items[index] if index < len(existing_items) else {}
+            base["product_id"] = product_id
+            base.setdefault("item_id", f"item_{index + 1}")
+            product = self.db["products"].get(product_id)
+            if product and product.get("name"):
+                base["name"] = product["name"]
+            updated.append(base)
+        return updated
+
+    def _normalize_id_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        return [str(value)]
+
+    def _missing_item_ids(self, order: dict[str, Any], item_ids: list[str]) -> list[str]:
+        if not item_ids:
+            return []
+        existing = {
+            str(item.get("item_id") or item.get("id") or "")
+            for item in order.get("items", [])
+            if isinstance(item, dict)
+        }
+        return [item_id for item_id in item_ids if item_id not in existing]
+
+    def _mark_order_items(self, order: dict[str, Any], item_ids: list[str], status: str) -> None:
+        if not item_ids:
+            return
+        wanted = set(item_ids)
+        for item in order.get("items", []):
+            if isinstance(item, dict) and str(item.get("item_id") or item.get("id") or "") in wanted:
+                item["status"] = status
+
     def _compact_record(self, record: dict[str, Any]) -> str:
         return json.dumps(record, ensure_ascii=False, sort_keys=True)
 
@@ -673,27 +893,460 @@ class TauBenchEnv(AgentEnv):
 
     def _evaluate_task(self, task: Task, final_answer: str) -> tuple[bool, str | None]:
         expected = [part.lower() for part in task.expected_answer_contains]
-        if self.evaluation in {"auto", "answer_contains"} and expected:
-            success = all(part in final_answer.lower() for part in expected)
-            return success, None if success else "expected_answer_mismatch"
-
         expected_actions = task.metadata.get("expected_actions") or []
-        if self.evaluation in {"auto", "tool_sequence", "action_sequence"} and expected_actions:
-            success = self._actions_match(expected_actions)
-            return success, None if success else "expected_action_sequence_mismatch"
+        expected_state_diff = self._expected_state_diff(task)
+        action_detail = self._compare_actions(expected_actions)
+        state_detail = self._compare_state_diff(expected_state_diff)
+        tool_semantic_errors = self._tool_semantic_errors()
+        policy_violations = self._policy_violations(tool_semantic_errors)
 
-        success = bool(final_answer.strip()) and "unable to determine" not in final_answer.lower()
-        return success, None if success else "empty_or_unusable_final_answer"
+        answer_success: bool | None = None
+        if expected:
+            answer_success = all(part in final_answer.lower() for part in expected)
 
-    def _actions_match(self, expected_actions: list[dict[str, Any]]) -> bool:
+        evaluation_mode = self._selected_evaluation_mode(
+            has_expected_answer=answer_success is not None,
+            has_expected_actions=bool(expected_actions),
+            has_expected_state_diff=bool(expected_state_diff),
+        )
+
+        success: bool
+        error_type: str | None
+        if evaluation_mode == "answer_contains":
+            success = bool(answer_success)
+            error_type = None if success else "expected_answer_mismatch"
+        elif evaluation_mode == "action_sequence":
+            success = bool(action_detail["passed"])
+            error_type = None if success else self._action_error_type(action_detail)
+        elif evaluation_mode == "state_diff":
+            success = bool(state_detail["passed"])
+            error_type = None if success else "state_diff_mismatch"
+        elif evaluation_mode == "policy_violation":
+            success = len(policy_violations) == 0
+            error_type = None if success else "policy_violation"
+        elif evaluation_mode == "official_like":
+            checks: list[bool] = []
+            if expected_actions:
+                checks.append(bool(action_detail["passed"]))
+            if expected_state_diff:
+                checks.append(bool(state_detail["passed"]))
+            if answer_success is not None:
+                checks.append(bool(answer_success))
+            if not checks:
+                checks.append(
+                    bool(final_answer.strip())
+                    and "unable to determine" not in final_answer.lower()
+                )
+            unexpected_policy_violations = [] if self._expects_policy_violation(task) else policy_violations
+            success = all(checks) and not unexpected_policy_violations
+            error_type = self._official_like_error_type(
+                answer_success=answer_success,
+                action_detail=action_detail,
+                state_detail=state_detail,
+                policy_violations=unexpected_policy_violations,
+            )
+        else:
+            success = bool(final_answer.strip()) and "unable to determine" not in final_answer.lower()
+            error_type = None if success else "empty_or_unusable_final_answer"
+
+        self._last_evaluation_detail = {
+            "task_id": task.task_id,
+            "evaluation_requested": self.evaluation,
+            "evaluation_mode": evaluation_mode,
+            "success": success,
+            "error_type": error_type,
+            "answer_contains_passed": answer_success,
+            "expected_answer_parts": list(task.expected_answer_contains),
+            "expected_actions_matched": action_detail["passed"] if expected_actions else None,
+            "expected_action_count": len(expected_actions),
+            "actual_action_count": len(self._tool_history),
+            "action_args_compared": self.compare_action_args,
+            "action_mismatches": action_detail["mismatches"],
+            "state_diff_passed": state_detail["passed"] if expected_state_diff else None,
+            "state_diff_expected": expected_state_diff or None,
+            "state_diff_mismatches": state_detail["mismatches"],
+            "state_diff_summary": self._state_diff_summary(),
+            "policy_violation_count": len(policy_violations),
+            "policy_violations": policy_violations,
+            "tool_semantic_error_count": len(tool_semantic_errors),
+            "tool_semantic_errors": tool_semantic_errors,
+        }
+        return success, error_type
+
+    def _selected_evaluation_mode(
+        self,
+        has_expected_answer: bool,
+        has_expected_actions: bool,
+        has_expected_state_diff: bool,
+    ) -> str:
+        if self.evaluation in {"tool_sequence", "action_sequence"}:
+            return "action_sequence"
+        if self.evaluation == "answer_contains":
+            return "answer_contains"
+        if self.evaluation == "state_diff":
+            return "state_diff"
+        if self.evaluation == "policy_violation":
+            return "policy_violation"
+        if self.evaluation == "official_like":
+            return "official_like"
+        if self.evaluation == "auto":
+            if has_expected_state_diff:
+                return "state_diff"
+            if has_expected_answer:
+                return "answer_contains"
+            if has_expected_actions:
+                return "action_sequence"
+        return "heuristic_final_answer"
+
+    def _expected_state_diff(self, task: Task) -> dict[str, Any]:
+        value = (
+            task.metadata.get("expected_state_diff")
+            or task.metadata.get("state_diff")
+            or task.metadata.get("expected_db_state")
+            or {}
+        )
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _expects_policy_violation(self, task: Task) -> bool:
+        return bool(
+            task.metadata.get("expected_policy_violation")
+            or task.metadata.get("expect_policy_violation")
+            or task.metadata.get("allow_policy_violation")
+        )
+
+    def _official_like_error_type(
+        self,
+        answer_success: bool | None,
+        action_detail: dict[str, Any],
+        state_detail: dict[str, Any],
+        policy_violations: list[dict[str, Any]],
+    ) -> str | None:
+        if policy_violations:
+            return "policy_violation"
+        if action_detail["evaluated"] and not action_detail["passed"]:
+            return self._action_error_type(action_detail)
+        if state_detail["evaluated"] and not state_detail["passed"]:
+            return "state_diff_mismatch"
+        if answer_success is False:
+            return "expected_answer_mismatch"
+        return None
+
+    def _action_error_type(self, action_detail: dict[str, Any]) -> str:
+        mismatch_reasons = {
+            str(mismatch.get("reason")) for mismatch in action_detail["mismatches"]
+        }
+        if "tool_name_mismatch" in mismatch_reasons:
+            return "expected_tool_name_mismatch"
+        if "arg_value_mismatch" in mismatch_reasons or "missing_required_arg" in mismatch_reasons:
+            return "expected_action_arg_mismatch"
+        return "expected_action_sequence_mismatch"
+
+    def _compare_actions(self, expected_actions: list[dict[str, Any]]) -> dict[str, Any]:
+        mismatches: list[dict[str, Any]] = []
+        if not expected_actions:
+            return {"evaluated": False, "passed": None, "mismatches": mismatches}
         if len(expected_actions) != len(self._tool_history):
-            return False
-        for expected, actual in zip(expected_actions, self._tool_history, strict=True):
+            mismatches.append(
+                {
+                    "reason": "action_count_mismatch",
+                    "expected_count": len(expected_actions),
+                    "actual_count": len(self._tool_history),
+                }
+            )
+        for index, expected in enumerate(expected_actions):
+            actual = self._tool_history[index] if index < len(self._tool_history) else None
+            if actual is None:
+                mismatches.append(
+                    {
+                        "reason": "missing_actual_action",
+                        "index": index,
+                        "expected_tool_name": expected.get("name"),
+                    }
+                )
+                continue
             if expected.get("name") != actual.get("tool_name"):
-                return False
-            if self.compare_action_args and expected.get("args", {}) != actual.get("args", {}):
-                return False
-        return True
+                mismatches.append(
+                    {
+                        "reason": "tool_name_mismatch",
+                        "index": index,
+                        "expected_tool_name": expected.get("name"),
+                        "actual_tool_name": actual.get("tool_name"),
+                    }
+                )
+            if self.compare_action_args:
+                mismatches.extend(self._compare_action_args(index, expected, actual))
+        return {"evaluated": True, "passed": not mismatches, "mismatches": mismatches}
+
+    def _compare_action_args(
+        self,
+        index: int,
+        expected: dict[str, Any],
+        actual: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        mismatches: list[dict[str, Any]] = []
+        expected_args = expected.get("args", {}) if isinstance(expected.get("args", {}), dict) else {}
+        actual_args = actual.get("args", {}) if isinstance(actual.get("args", {}), dict) else {}
+        optional_args = set(str(item) for item in expected.get("optional_args", []))
+        ignore_args = set(str(item) for item in expected.get("ignore_args", []))
+        for key, expected_value in expected_args.items():
+            if key in ignore_args:
+                continue
+            if key not in actual_args:
+                if key not in optional_args:
+                    mismatches.append(
+                        {
+                            "reason": "missing_required_arg",
+                            "index": index,
+                            "arg_name": key,
+                            "expected": expected_value,
+                        }
+                    )
+                continue
+            normalized_expected = self._normalize_arg_value(key, expected_value)
+            normalized_actual = self._normalize_arg_value(key, actual_args[key])
+            if normalized_expected != normalized_actual:
+                mismatches.append(
+                    {
+                        "reason": "arg_value_mismatch",
+                        "index": index,
+                        "arg_name": key,
+                        "expected": expected_value,
+                        "actual": actual_args[key],
+                        "normalized_expected": normalized_expected,
+                        "normalized_actual": normalized_actual,
+                    }
+                )
+        if self.strict_action_args:
+            extra_args = set(actual_args) - set(expected_args) - ignore_args
+            for key in sorted(extra_args):
+                mismatches.append(
+                    {
+                        "reason": "unexpected_arg",
+                        "index": index,
+                        "arg_name": key,
+                        "actual": actual_args[key],
+                    }
+                )
+        return mismatches
+
+    def _normalize_arg_value(self, key: str, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(child_key): self._normalize_arg_value(str(child_key), child_value)
+                for child_key, child_value in sorted(value.items())
+            }
+        if isinstance(value, list):
+            normalized = [self._normalize_arg_value(key, item) for item in value]
+            return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True))
+        if isinstance(value, str):
+            text = value.strip()
+            key_lower = key.lower()
+            if key_lower in {"order_id", "orderid"} or key_lower.endswith("_order_id"):
+                return self._clean_order_id(text).lower()
+            if key_lower.endswith("_id") or key_lower in {"item_ids", "product_ids"}:
+                return text.strip("#").lower()
+            return text.lower()
+        return value
+
+    def _compare_state_diff(self, expected_state_diff: dict[str, Any]) -> dict[str, Any]:
+        mismatches: list[dict[str, Any]] = []
+        if not expected_state_diff:
+            return {"evaluated": False, "passed": None, "mismatches": mismatches}
+        for section, expected_records in expected_state_diff.items():
+            expected_by_id = self._expected_state_records(str(section), expected_records)
+            actual_section = self.db.get(section, {})
+            for record_id, expected_fields in expected_by_id.items():
+                actual_record = self._record_for_state_section(str(section), str(record_id), actual_section)
+                if actual_record is None:
+                    mismatches.append(
+                        {
+                            "reason": "missing_state_record",
+                            "section": section,
+                            "record_id": record_id,
+                        }
+                    )
+                    continue
+                mismatches.extend(
+                    self._compare_expected_fields(
+                        section=str(section),
+                        record_id=str(record_id),
+                        path="",
+                        expected=expected_fields,
+                        actual=actual_record,
+                    )
+                )
+        return {"evaluated": True, "passed": not mismatches, "mismatches": mismatches}
+
+    def _expected_state_records(self, section: str, records: Any) -> dict[str, dict[str, Any]]:
+        id_keys = {
+            "orders": ("order_id", "id"),
+            "users": ("user_id", "id", "customer_id"),
+            "products": ("product_id", "sku", "id", "item_id"),
+        }.get(section, ("id",))
+        if isinstance(records, dict):
+            by_id: dict[str, dict[str, Any]] = {}
+            for record_id, fields in records.items():
+                if isinstance(fields, dict):
+                    by_id[str(record_id)] = fields
+            return by_id
+        if isinstance(records, list):
+            by_id = {}
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                record_id = self._first_present(record, id_keys)
+                if record_id is None:
+                    continue
+                fields = dict(record)
+                for key in id_keys:
+                    fields.pop(key, None)
+                by_id[str(record_id)] = fields
+            return by_id
+        return {}
+
+    def _record_for_state_section(
+        self,
+        section: str,
+        record_id: str,
+        actual_section: Any,
+    ) -> dict[str, Any] | None:
+        if not isinstance(actual_section, dict):
+            return None
+        if section == "orders":
+            return self._get_order_record(record_id)
+        candidates = [record_id, record_id.strip().lstrip("#")]
+        for candidate in candidates:
+            if candidate in actual_section:
+                return actual_section[candidate]
+        return None
+
+    def _compare_expected_fields(
+        self,
+        section: str,
+        record_id: str,
+        path: str,
+        expected: Any,
+        actual: Any,
+    ) -> list[dict[str, Any]]:
+        mismatches: list[dict[str, Any]] = []
+        if isinstance(expected, dict):
+            if not isinstance(actual, dict):
+                return [
+                    {
+                        "reason": "state_type_mismatch",
+                        "section": section,
+                        "record_id": record_id,
+                        "path": path,
+                        "expected_type": "dict",
+                        "actual": actual,
+                    }
+                ]
+            for key, expected_value in expected.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                if key not in actual:
+                    mismatches.append(
+                        {
+                            "reason": "missing_state_field",
+                            "section": section,
+                            "record_id": record_id,
+                            "path": child_path,
+                            "expected": expected_value,
+                        }
+                    )
+                    continue
+                mismatches.extend(
+                    self._compare_expected_fields(
+                        section=section,
+                        record_id=record_id,
+                        path=child_path,
+                        expected=expected_value,
+                        actual=actual[key],
+                    )
+                )
+            return mismatches
+        key = path.rsplit(".", 1)[-1] if path else ""
+        normalized_expected = self._normalize_arg_value(key, expected)
+        normalized_actual = self._normalize_arg_value(key, actual)
+        if normalized_expected != normalized_actual:
+            mismatches.append(
+                {
+                    "reason": "state_value_mismatch",
+                    "section": section,
+                    "record_id": record_id,
+                    "path": path,
+                    "expected": expected,
+                    "actual": actual,
+                    "normalized_expected": normalized_expected,
+                    "normalized_actual": normalized_actual,
+                }
+            )
+        return mismatches
+
+    def _state_diff_summary(self) -> dict[str, Any]:
+        before = self._task_initial_db or self.initial_db
+        summary: dict[str, Any] = {}
+        for section in ("users", "orders", "products"):
+            before_records = before.get(section, {})
+            after_records = self.db.get(section, {})
+            section_diff = self._section_diff(before_records, after_records)
+            if section_diff:
+                summary[section] = section_diff
+        return summary
+
+    def _section_diff(
+        self,
+        before_records: Any,
+        after_records: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(before_records, dict) or not isinstance(after_records, dict):
+            return {}
+        diff: dict[str, Any] = {}
+        for record_id in sorted(set(before_records) | set(after_records)):
+            before = before_records.get(record_id)
+            after = after_records.get(record_id)
+            if before != after:
+                diff[record_id] = self._record_diff(before, after)
+        return diff
+
+    def _record_diff(self, before: Any, after: Any) -> dict[str, Any]:
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return {"before": before, "after": after}
+        changes: dict[str, Any] = {}
+        for key in sorted(set(before) | set(after)):
+            before_value = before.get(key)
+            after_value = after.get(key)
+            if before_value != after_value:
+                changes[key] = {"before": before_value, "after": after_value}
+        return changes
+
+    def _tool_semantic_errors(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "tool_name": record.get("tool_name"),
+                "args": record.get("args", {}),
+                "observation": record.get("observation", ""),
+            }
+            for record in self._tool_history
+            if record.get("ok") is False
+        ]
+
+    def _policy_violations(self, tool_semantic_errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        mutation_tools = {
+            "modify_pending_order_address",
+            "modify_pending_order_payment",
+            "modify_pending_order_items",
+            "cancel_pending_order",
+            "return_delivered_order_items",
+            "exchange_delivered_order_items",
+        }
+        violations = []
+        for error in tool_semantic_errors:
+            tool_name = str(error.get("tool_name") or "")
+            if tool_name in mutation_tools:
+                violation = dict(error)
+                violation["violation_type"] = "retail_tool_precondition_failed"
+                violations.append(violation)
+        return violations
 
 
 def _safe_arithmetic_eval(expression: str) -> int | float:

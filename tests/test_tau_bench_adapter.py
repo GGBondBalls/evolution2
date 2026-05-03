@@ -51,6 +51,50 @@ models:
     )
 
 
+def _write_tau_retail_phase2_config(
+    config_path: Path,
+    output_dir: Path,
+    experiment_name: str,
+    memory_block: str = "",
+) -> None:
+    split_file = Path("data/task_splits/tau_retail_phase2_state_tasks.py").resolve()
+    data_dir = Path("data/tau_bench/retail_phase2_state").resolve()
+    memory_section = f"\nmemory:\n{memory_block}\n" if memory_block else ""
+    config_path.write_text(
+        f"""
+experiment:
+  name: {experiment_name}
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: {split_file.as_posix()}
+  data_dir: {data_dir.as_posix()}
+  evaluation: official_like
+  compare_action_args: true
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 3
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 2
+models:
+  actor:
+    provider: mock
+    model: mock-tool-agent
+    temperature: 0.0
+    max_tokens: 2048
+{memory_section}logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+
 def test_tau_retail_smoke_adapter_runs(tmp_path: Path) -> None:
     config_path = tmp_path / "tau_retail_smoke.yaml"
     output_dir = tmp_path / "runs" / "tau_retail"
@@ -439,3 +483,135 @@ def test_tau_retail_tool_sequence_evaluator(tmp_path: Path) -> None:
     assert success is True
     assert reward == 1.0
     assert error_type is None
+
+
+def test_tau_retail_action_args_normalize_order_ids() -> None:
+    env = TauBenchEnv(
+        {
+            "name": "tau_bench",
+            "domain": "retail",
+            "split_file": "data/task_splits/tau_retail_phase2_state_tasks.py",
+            "data_dir": "data/tau_bench/retail_phase2_state",
+            "evaluation": "action_sequence",
+            "compare_action_args": True,
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+    task = next(task for task in env.load_tasks() if task.task_id == "tau_retail_phase2_read_001")
+
+    env.start_task(task)
+    tool_result = env.call_tool("get_order_details", {"order_id": "READ1001"})
+    success, reward, error_type = env.evaluate(task, tool_result.observation)
+
+    assert success is True
+    assert reward == 1.0
+    assert error_type is None
+    assert env.last_evaluation_detail["expected_actions_matched"] is True
+    assert env.last_evaluation_detail["action_mismatches"] == []
+
+
+def test_tau_retail_task_state_resets_between_tasks() -> None:
+    env = TauBenchEnv(
+        {
+            "name": "tau_bench",
+            "domain": "retail",
+            "split_file": "data/task_splits/tau_retail_phase2_state_tasks.py",
+            "data_dir": "data/tau_bench/retail_phase2_state",
+            "evaluation": "official_like",
+            "compare_action_args": True,
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+    tasks = {task.task_id: task for task in env.load_tasks()}
+
+    cancel_task = tasks["tau_retail_phase2_cancel_001"]
+    env.start_task(cancel_task)
+    cancel_result = env.call_tool(
+        "cancel_pending_order",
+        {"order_id": "PEND2001", "reason": "customer_request"},
+    )
+    success, _, error_type = env.evaluate(cancel_task, cancel_result.observation)
+    assert success is True
+    assert error_type is None
+    assert env.last_evaluation_detail["state_diff_passed"] is True
+    assert env._get_order_record("PEND2001")["status"] == "cancelled"
+
+    env.start_task(tasks["tau_retail_phase2_read_001"])
+    reset_result = env.call_tool("get_order_details", {"order_id": "PEND2001"})
+    assert reset_result.ok
+    assert '"status": "pending"' in reset_result.observation
+
+
+def test_tau_retail_phase2_state_config_logs_evaluator_details(tmp_path: Path) -> None:
+    config_path = tmp_path / "tau_retail_phase2_state.yaml"
+    output_dir = tmp_path / "runs" / "phase2_state"
+    _write_tau_retail_phase2_config(
+        config_path=config_path,
+        output_dir=output_dir,
+        experiment_name="tau_retail_phase2_state_test",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["success_rate"] == pytest.approx(2 / 3)
+    assert metrics["evaluation_modes"] == {"official_like": 3}
+    assert metrics["expected_actions_matched_count"] == 3
+    assert metrics["state_diff_evaluated_count"] == 1
+    assert metrics["state_diff_passed_count"] == 1
+    assert metrics["policy_violation_count"] == 1
+    assert metrics["tool_semantic_error_count"] == 1
+    assert metrics["evaluator_error_types"] == {"policy_violation": 1}
+
+    run_records = [
+        json.loads(line)
+        for line in (output_dir / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    cancel_record = next(
+        record for record in run_records if record["task_id"] == "tau_retail_phase2_cancel_001"
+    )
+    policy_fail_record = next(
+        record
+        for record in run_records
+        if record["task_id"] == "tau_retail_phase2_return_policy_fail_001"
+    )
+
+    assert cancel_record["success"] is True
+    assert cancel_record["evaluation_details"]["state_diff_passed"] is True
+    assert "#PEND2001" in cancel_record["evaluation_details"]["state_diff_summary"]["orders"]
+    assert policy_fail_record["success"] is False
+    assert policy_fail_record["error_type"] == "policy_violation"
+    assert policy_fail_record["evaluation_details"]["policy_violation_count"] == 1
+    assert policy_fail_record["evaluation_details"]["expected_actions_matched"] is True
+
+
+def test_tau_retail_phase2_raw_trace_keeps_evaluator_details(tmp_path: Path) -> None:
+    config_path = tmp_path / "tau_retail_phase2_raw.yaml"
+    output_dir = tmp_path / "runs" / "phase2_raw"
+    _write_tau_retail_phase2_config(
+        config_path=config_path,
+        output_dir=output_dir,
+        experiment_name="tau_retail_phase2_raw_test",
+        memory_block="  method: raw_trace_rag\n  top_k: 2\n  save_failures: true",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 3
+    assert metrics["memory_policy"] == "raw_trace_rag"
+    assert metrics["memory_size"] == 3
+    assert metrics["policy_violation_count"] == 1
+
+    memory_records = [
+        json.loads(line)
+        for line in (output_dir / "memories.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    run_records = [
+        json.loads(line)
+        for line in (output_dir / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+    assert len(memory_records) == 3
+    assert all("evaluation_details" in record for record in run_records)

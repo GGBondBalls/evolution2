@@ -137,6 +137,12 @@ class MockLLMClient(LLMClient):
             "get_order_details",
             "get_product_details",
             "list_all_product_types",
+            "modify_pending_order_address",
+            "modify_pending_order_payment",
+            "modify_pending_order_items",
+            "cancel_pending_order",
+            "return_delivered_order_items",
+            "exchange_delivered_order_items",
         )
         tool_match = re.search(
             r"\b(" + "|".join(re.escape(name) for name in tool_names) + r")"
@@ -189,7 +195,61 @@ class MockLLMClient(LLMClient):
                 "args": {"email": email_match.group(0)},
             }
 
-        order_match = re.search(r"#?([A-Z]\d{7,}|ORDER-\d+)", task_text, flags=re.IGNORECASE)
+        order_match = re.search(
+            r"\border\s+#?([A-Z][A-Z0-9_-]{3,}\d[A-Z0-9_-]*)",
+            task_text,
+            flags=re.IGNORECASE,
+        ) or re.search(
+            r"#?([A-Z][A-Z0-9_-]{3,}\d[A-Z0-9_-]*)",
+            task_text,
+            flags=re.IGNORECASE,
+        )
+        if order_match and "cancel" in lower_task:
+            return {
+                "thought": "The task asks to cancel a pending retail order.",
+                "action": "tool",
+                "tool_name": "cancel_pending_order",
+                "args": {
+                    "order_id": order_match.group(1).upper(),
+                    "reason": "customer_request",
+                },
+            }
+
+        if order_match and "return" in lower_task:
+            item_match = re.search(r"\b(item[_-][A-Za-z0-9_-]+|item\d+)\b", task_text, flags=re.IGNORECASE)
+            item_ids = [item_match.group(1)] if item_match else []
+            return {
+                "thought": "The task asks to return delivered order items.",
+                "action": "tool",
+                "tool_name": "return_delivered_order_items",
+                "args": {
+                    "order_id": order_match.group(1).upper(),
+                    "item_ids": item_ids,
+                },
+            }
+
+        if order_match and "exchange" in lower_task:
+            item_match = re.search(r"\b(item[_-][A-Za-z0-9_-]+|item\d+)\b", task_text, flags=re.IGNORECASE)
+            product_match_for_exchange = re.search(
+                r"(?:product|item)\s+(?:id\s+)?#?([A-Z0-9][A-Za-z0-9_-]{4,})\b",
+                task_text,
+                flags=re.IGNORECASE,
+            )
+            return {
+                "thought": "The task asks to exchange delivered order items.",
+                "action": "tool",
+                "tool_name": "exchange_delivered_order_items",
+                "args": {
+                    "order_id": order_match.group(1).upper(),
+                    "item_ids": [item_match.group(1)] if item_match else [],
+                    "product_ids": (
+                        [product_match_for_exchange.group(1)]
+                        if product_match_for_exchange
+                        else []
+                    ),
+                },
+            }
+
         if order_match and "order" in lower_task:
             return {
                 "thought": "The task asks for order details.",

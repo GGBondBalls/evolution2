@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
+
 from ntmemevo.types import AgentResult
 
 
-def aggregate_results(results: list[AgentResult]) -> dict[str, float | int]:
+def aggregate_results(results: list[AgentResult]) -> dict[str, object]:
     if not results:
         return {
             "num_tasks": 0,
@@ -23,6 +25,44 @@ def aggregate_results(results: list[AgentResult]) -> dict[str, float | int]:
         "avg_prompt_tokens": sum(result.prompt_tokens for result in results) / n,
         "avg_completion_tokens": sum(result.completion_tokens for result in results) / n,
         "avg_tool_calls": sum(result.tool_calls for result in results) / n,
+        **aggregate_evaluation_details(results),
+    }
+
+
+def aggregate_evaluation_details(results: list[AgentResult]) -> dict[str, object]:
+    details = [result.evaluation_details for result in results if result.evaluation_details]
+    modes = Counter(str(detail.get("evaluation_mode")) for detail in details if detail.get("evaluation_mode"))
+    error_types = Counter(result.error_type for result in results if result.error_type)
+
+    state_diff_evaluated = [
+        detail for detail in details if detail.get("state_diff_passed") is not None
+    ]
+    action_evaluated = [
+        detail for detail in details if detail.get("expected_actions_matched") is not None
+    ]
+    return {
+        "evaluation_modes": dict(sorted(modes.items())),
+        "state_diff_evaluated_count": len(state_diff_evaluated),
+        "state_diff_passed_count": sum(
+            1 for detail in state_diff_evaluated if detail.get("state_diff_passed") is True
+        ),
+        "state_diff_failed_count": sum(
+            1 for detail in state_diff_evaluated if detail.get("state_diff_passed") is False
+        ),
+        "expected_actions_evaluated_count": len(action_evaluated),
+        "expected_actions_matched_count": sum(
+            1 for detail in action_evaluated if detail.get("expected_actions_matched") is True
+        ),
+        "expected_actions_failed_count": sum(
+            1 for detail in action_evaluated if detail.get("expected_actions_matched") is False
+        ),
+        "policy_violation_count": sum(
+            int(detail.get("policy_violation_count") or 0) for detail in details
+        ),
+        "tool_semantic_error_count": sum(
+            int(detail.get("tool_semantic_error_count") or 0) for detail in details
+        ),
+        "evaluator_error_types": dict(sorted(error_types.items())),
     }
 
 
