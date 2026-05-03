@@ -344,6 +344,175 @@ def test_tau_retail_export_sample_loads_python_tasks_and_data_dir() -> None:
     assert "#W2378156" in order_result.observation
 
 
+def test_tau2_official_nested_task_format_loads_and_filters(tmp_path: Path) -> None:
+    tasks_path = tmp_path / "official_tasks.json"
+    split_path = tmp_path / "official_splits.json"
+    tasks_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "0",
+                    "user_scenario": {
+                        "instructions": {
+                            "task_instructions": "Be concise.",
+                            "domain": "retail",
+                            "reason_for_call": "Look up the details for order #READ1001.",
+                            "known_info": "You are Mira Chen.",
+                            "unknown_info": "You do not know anything else.",
+                        }
+                    },
+                    "evaluation_criteria": {
+                        "actions": [
+                            {
+                                "action_id": "0_0",
+                                "name": "get_order_details",
+                                "arguments": {"order_id": "#READ1001"},
+                            }
+                        ],
+                        "communicate_info": [],
+                        "nl_assertions": None,
+                        "reward_basis": ["DB"],
+                    },
+                },
+                {
+                    "id": "1",
+                    "user_scenario": {
+                        "instructions": {
+                            "reason_for_call": "This task should be filtered out.",
+                            "known_info": "No relevant info.",
+                        }
+                    },
+                    "evaluation_criteria": {
+                        "actions": [
+                            {
+                                "name": "get_order_details",
+                                "arguments": {"order_id": "#PEND2001"},
+                            }
+                        ],
+                        "reward_basis": ["DB"],
+                    },
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    split_path.write_text(json.dumps({"base": ["0"], "test": ["1"]}), encoding="utf-8")
+
+    env = TauBenchEnv(
+        {
+            "domain": "retail",
+            "split_file": str(tasks_path),
+            "task_split_file": str(split_path),
+            "task_split": "base",
+            "data_dir": "data/tau_bench/retail_phase2_state",
+            "evaluation": "official_like",
+            "compare_action_args": True,
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+
+    tasks = env.load_tasks()
+
+    assert [task.task_id for task in tasks] == ["0"]
+    assert "Customer request: Look up the details for order #READ1001." in tasks[0].instruction
+    assert tasks[0].metadata["source_format"] == "tau2_official"
+    assert tasks[0].metadata["no_memory_success"] is False
+    assert tasks[0].metadata["expected_actions"] == [
+        {
+            "name": "get_order_details",
+            "args": {"order_id": "#READ1001"},
+            "optional_args": [],
+            "ignore_args": [],
+        }
+    ]
+
+
+def test_tau2_official_nested_task_config_runs_with_official_like_evaluator(tmp_path: Path) -> None:
+    tasks_path = tmp_path / "official_tasks.json"
+    split_path = tmp_path / "official_splits.json"
+    tasks_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "0",
+                    "user_scenario": {
+                        "instructions": {
+                            "task_instructions": "Be concise.",
+                            "domain": "retail",
+                            "reason_for_call": "Look up the details for order #READ1001.",
+                            "known_info": "You are Mira Chen.",
+                            "unknown_info": "You do not know anything else.",
+                        }
+                    },
+                    "evaluation_criteria": {
+                        "actions": [
+                            {
+                                "name": "get_order_details",
+                                "arguments": {"order_id": "#READ1001"},
+                            }
+                        ],
+                        "communicate_info": [],
+                        "nl_assertions": None,
+                        "reward_basis": ["DB"],
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    split_path.write_text(json.dumps({"base": ["0"]}), encoding="utf-8")
+
+    output_dir = tmp_path / "runs" / "official_nested"
+    config_path = tmp_path / "official_nested.yaml"
+    config_path.write_text(
+        f"""
+experiment:
+  name: official_nested_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: {tasks_path.as_posix()}
+  task_split_file: {split_path.as_posix()}
+  task_split: base
+  data_dir: data/tau_bench/retail_phase2_state
+  evaluation: official_like
+  compare_action_args: true
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 1
+agent:
+  type: react_tool_agent
+  max_steps: 4
+  memory_top_k: 0
+models:
+  actor:
+    provider: mock
+    model: mock-tool-agent
+    temperature: 0.0
+    max_tokens: 2048
+logging:
+  save_raw_model_io: true
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 1
+    assert metrics["success_rate"] == 1.0
+    assert metrics["evaluation_modes"] == {"official_like": 1}
+    assert metrics["expected_actions_matched_count"] == 1
+
+    run_record = json.loads((output_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert run_record["evaluation_details"]["expected_actions_matched"] is True
+    assert run_record["evaluation_details"]["action_args_compared"] is True
+
+
 def test_tau_retail_real_export_raw_trace_config_path_runs(tmp_path: Path) -> None:
     split_file = Path("data/task_splits/tau_retail_export_sample_tasks.py").resolve()
     data_dir = Path("data/tau_bench/retail_export_sample").resolve()

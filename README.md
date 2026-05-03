@@ -21,6 +21,7 @@ Current scope:
 15. Run a minimal tau-bench retail adapter with local smoke tasks, retail DB tools, evaluator mapping, and the same task/run/trace/metric logs.
 16. Run tau-retail smoke baselines for `none`, `raw_trace_rag`, `reflexion`, `nt_memevo_candidate`, and `nt_memevo_gate`.
 17. Run phase-two tau-retail state/evaluator alignment checks with task-level DB reset, mutation-tool semantics, state-diff details, action-argument normalization, and policy/precondition violation logging.
+18. Run phase-two probes directly against a cloned official `sierra-research/tau2-bench` retail checkout, including official nested task loading, split filtering, and raw-trace memory logging.
 
 ## Environment
 
@@ -124,6 +125,27 @@ python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_sta
 python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml
 ```
 
+Phase-two official tau2-bench retail probe:
+
+```bash
+git clone https://github.com/sierra-research/tau-bench.git data/external/tau-bench
+git clone https://github.com/sierra-research/tau2-bench.git data/external/tau2-bench
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml
+```
+
+`data/external/` is ignored by git. The old `tau-bench` repository is kept for
+compatibility and historical trajectories; its README currently points to
+`tau2-bench` / tau-three as the updated task source. The phase-two official
+configs therefore use:
+
+```text
+data/external/tau2-bench/data/tau2/domains/retail/tasks.json
+data/external/tau2-bench/data/tau2/domains/retail/split_tasks.json
+data/external/tau2-bench/data/tau2/domains/retail/db.json
+```
+
 `configs/tau_retail_nomem.yaml` uses local smoke fixtures by default:
 
 ```text
@@ -143,6 +165,10 @@ To run against a real tau-bench retail checkout or exported split, set
 `benchmark.split_file` to a local JSON/JSONL/Python task file and set
 `benchmark.data_file` or `benchmark.data_dir` to retail data. The adapter also
 accepts `benchmark.task_module` or an installed tau-bench package with task modules.
+For official tau2-bench JSON files, set `benchmark.task_split_file` to
+`split_tasks.json` and choose `benchmark.task_split=base|train|test`; optionally
+set `benchmark.task_ids` to a comma-separated string or list for a minimal
+debug subset.
 Use `benchmark.validate_export_schema=true` for exported files so missing task
 outcomes or malformed DB sections fail before the agent loop starts. The expected
 local export format is documented in `docs/tau_retail_export_schema.md`. Missing

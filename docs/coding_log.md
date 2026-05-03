@@ -1365,3 +1365,127 @@ grep '"event_type": "retrieve"' runs/tau_retail_phase2_state_raw_trace_rag_seed1
 3. 真实 export `max_tasks=1` 至少能生成 `tasks.jsonl`、`runs.jsonl`、`trace_events.jsonl` 和 `metrics.json`。
 4. 若真实 export 任务失败，失败原因必须能归入明确类别，并记录最小复现 task/data 片段。
 5. 同一真实 export 的 raw-trace-rag 能写入 memory 与 retrieve 日志，不改变 evaluator 解释链路。
+
+## 2026-05-03 第二阶段第二轮
+
+目标：进入“真实 tau-retail export 小批量语义对齐”，按用户要求克隆官方真实数据，并把实验配置从本地 phase-two fixture 推进到官方 `tau2-bench` retail 任务/DB 文件；同时修正官方任务在当前 mock actor 下没有已知 no-memory 反事实时的负迁移误标风险。
+
+官方数据准备：
+
+1. 已克隆旧版官方仓库 `https://github.com/sierra-research/tau-bench.git` 到 `data/external/tau-bench/`，commit 为 `59a200c6d575d595120f1cb70fea53cef0632f6b`。
+2. 旧版 `tau-bench` README 明确提示任务文件已过期，并指向 `https://github.com/sierra-research/tau2-bench` 作为更新后的 tau-three 数据源。
+3. 已克隆更新官方仓库 `https://github.com/sierra-research/tau2-bench.git` 到 `data/external/tau2-bench/`，commit 为 `2be691669909439cf88dedc13decf94b7664d262`。
+4. `tau2-bench` retail 官方数据路径为 `data/external/tau2-bench/data/tau2/domains/retail/`，包含 `tasks.json`、`split_tasks.json`、`db.json`、`policy.md`、`tasks_voice.json`、audio difficulty 与 task issue 文件。
+5. 本轮统计官方 retail 数据：`tasks.json` 共 114 条任务，split 为 `train=74`、`test=40`、`base=114`；`db.json` 包含 `products=50`、`users=500`、`orders=1000`。
+6. 已将 `data/external/` 加入 `.gitignore`，避免把完整外部仓库纳入项目版本控制；后续智能体可在同一路径复用已克隆数据，若目录缺失按 README 命令重新克隆。
+
+已完成：
+
+1. 扩展 `TauBenchEnv`，支持直接读取官方 tau2 嵌套 task 结构：`user_scenario.instructions` 会被合成为项目内 `Task.instruction`，`evaluation_criteria.actions` 会转换为 `metadata.expected_actions`。
+2. 新增官方 split 过滤：`benchmark.task_split_file` 可指向 `split_tasks.json`，`benchmark.task_split` 支持 `base/train/test`，`benchmark.task_ids` 支持最小任务 id 子集调试。
+3. 官方 tau2 task metadata 保留 `source_format=tau2_official`、原始 `evaluation_criteria`、`user_scenario`、`tool_names` 和推断 intent，便于 `tasks.jsonl` 审计。
+4. 修正负迁移代理默认值：官方 tau2 任务缺少本项目 no-memory 反事实结果时，默认 `no_memory_success=false`；只有导出文件显式提供该字段时才使用 true，避免 raw-trace 失败被误记为 negative transfer。
+5. 扩展 retail tool wrapper，新增/补齐 `get_item_details`、`modify_user_address`、`new_item_ids`、`payment_method_id`、官方 address 字段和 item variant 查询的最小兼容语义。
+6. 扩展 `MockLLMClient` 的工具名解析，支持 `get_item_details`、`modify_user_address`，并将 exchange 的 replacement 参数改为官方常见的 `new_item_ids`。
+7. 新增官方 tau2 配置 `configs/tau_retail_phase2_official_tau2_nomem.yaml`，默认读取官方 base split 前 3 条任务，使用 `official_like`、`compare_action_args=true`。
+8. 新增官方 tau2 配置 `configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml`，在同一官方任务/DB 上启用 Raw Trace RAG，验证 memory 写入与逐轮检索。
+9. 扩展 `tests/test_tau_bench_adapter.py`，新增官方嵌套 task 格式、split 过滤、`official_like` action args 评估与 no-memory baseline 默认值测试。
+10. 更新 `README.md` 与 `docs/tau_retail_export_schema.md`，写明官方仓库克隆命令、tau2 数据路径、`task_split_file` / `task_ids` 配置、支持工具和当前边界。
+
+验证记录：
+
+1. `PYTHONPATH=src python -m pytest tests/test_tau_bench_adapter.py -q` 通过，结果为 `16 passed in 0.09s`。
+2. `PYTHONPATH=src python -m pytest -q` 通过，结果为 `31 passed in 0.12s`。
+3. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml` 通过：`success_rate=0.6666666666666666`、`state_diff_passed_count=1`、`expected_actions_matched_count=3`、`policy_violation_count=1`。
+4. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml` 通过：`success_rate=0.6666666666666666`、`memory_policy=raw_trace_rag`、`memory_size=3`、`policy_violation_count=1`。
+5. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml` 成功生成官方 tau2 no-memory artifacts：`num_tasks=3`、`success_rate=0.0`、`evaluation_modes={"official_like": 3}`、`expected_actions_evaluated_count=3`、`expected_actions_matched_count=0`、`policy_violation_count=0`、`tool_semantic_error_count=0`、`negative_transfer_rate=0.0`。
+6. no-memory 官方任务失败是预期且可解释的：当前 mock actor 不是完整对话 agent，前 3 条官方 base 任务需要 5/5/11 步 expected actions，而 mock 只会做 0-1 次工具调用；`runs.jsonl.evaluation_details.action_mismatches` 明确给出 `action_count_mismatch`、`tool_name_mismatch` 和 `missing_actual_action`。
+7. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml` 成功：`num_tasks=3`、`success_rate=0.0`、`memory_policy=raw_trace_rag`、`memory_size=3`、`memory_top_k=2`、`expected_actions_failed_count=3`、`negative_transfer_rate=0.0`。
+8. 官方 raw-trace-rag 抽查确认逐轮检索正常：第 1 轮空检索，第 2 轮检索 `raw_000001_0`，第 3 轮检索 `raw_000002_1` 和 `raw_000001_0`。
+9. 第一阶段核心回归仍通过：`tiny_nt_memevo_gate_refine.yaml` 保持 `memory_refinement_count=1`、`memory_split_count=1`、`support_replay_helpful_count=2`、`support_replay_harmful_count=2`；`tiny_nt_memevo_gate_unsafe_polluted.yaml` 保持 `negative_transfer_rate=1.0`、`replay_harmful_count=1`、`quarantined_memory_count=1`。
+10. 修正前官方 raw-trace 由于默认 `no_memory_success=true` 曾把第 2/3 条失败误计为 `negative_transfer_rate=0.666666...`；修正后同一配置为 `negative_transfer_rate=0.0`，符合“未知 no-memory 反事实不做负迁移归因”的第二阶段口径。
+
+用户正式复验记录：
+
+1. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下运行 `python -m pytest`，环境为 Python 3.12.13、pytest 9.0.3、pluggy 1.6.0，结果为 `31 passed in 0.10s`。
+2. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml`，结果为 `num_tasks=3`、`success_rate=0.6666666666666666`、`avg_prompt_tokens=1011.3333333333334`、`evaluation_modes={"official_like": 3}`、`state_diff_passed_count=1`、`expected_actions_matched_count=3`、`policy_violation_count=1`、`tool_semantic_error_count=1`、`memory_policy=none`。
+3. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml`，结果为 `success_rate=0.6666666666666666`、`avg_prompt_tokens=1354.6666666666667`、`memory_policy=raw_trace_rag`、`memory_size=3`、`memory_top_k=2`、`policy_violation_count=1`、`negative_transfer_rate=0.0`。
+4. 用户抽查 `runs/tau_retail_phase2_state_nomem_seed1/runs.jsonl`，确认 read 任务成功、cancel 任务 `state_diff_passed=true`、pending return 任务按预期触发 `error_type=policy_violation`。
+5. 用户抽查 `runs/tau_retail_phase2_state_nomem_seed1/trace_events.jsonl`，确认 `get_order_details` 与 `cancel_pending_order` 为 `ok=true`，`return_delivered_order_items` 对 pending order 为 `ok=false`。
+6. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml`，结果为 `num_tasks=3`、`success_rate=0.0`、`avg_prompt_tokens=988.0`、`expected_actions_matched_count=0`、`expected_actions_failed_count=3`、`evaluator_error_types={"expected_action_sequence_mismatch": 1, "expected_tool_name_mismatch": 2}`、`negative_transfer_rate=0.0`。
+7. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml`，结果为 `num_tasks=3`、`success_rate=0.0`、`avg_prompt_tokens=1279.6666666666667`、`memory_policy=raw_trace_rag`、`memory_size=3`、`memory_top_k=2`、`expected_actions_failed_count=3`、`negative_transfer_rate=0.0`。
+8. 用户抽查官方 no-memory `runs.jsonl`，确认 task `0` 和 `1` 当前 mock actor 只调用 1 次 `exchange_delivered_order_items`，而 expected action sequence 分别需要 5 步；task `2` 当前无工具调用，而 expected action sequence 需要 11 步。
+9. 用户抽查官方 raw-trace-rag `memories.jsonl`，确认 3 条失败轨迹被保存；抽查 `memory_updates.jsonl`，确认第 1 轮空检索、第 2 轮检索 `raw_000001_0`、第 3 轮检索 `raw_000002_1` 和 `raw_000001_0`。
+10. 用户确认官方数据版本：`data/external/tau-bench` commit 为 `59a200c6d575d595120f1cb70fea53cef0632f6b`，`data/external/tau2-bench` commit 为 `2be691669909439cf88dedc13decf94b7664d262`；tau2 retail 数据规模为 `tasks=114`、split `train=74/test=40/base=114`、DB `products=50/users=500/orders=1000`。
+
+当前边界：
+
+1. 本轮已正确链接并运行官方 tau2 retail 真实 task/DB，但 actor 仍是 deterministic mock，不具备完成官方多轮任务的能力，因此成功率为 0.0 不代表方法失效。
+2. `official_like` 仍是本项目本地可解释 evaluator，不等价于 tau2 官方 evaluator；本轮重点是任务/DB 加载、action mismatch 分类、memory 日志和负迁移代理口径。
+3. 官方 tau2 task 的 `communicate_info` / `nl_assertions` 尚未完整映射为自然语言评估，当前主要依赖 `evaluation_criteria.actions` 做可解释 action-sequence 评估。
+4. 官方 state diff / policy evaluator 对齐、真实 user/agent actor、完整多轮对话、support pool、gate/replay/verification 仍属于第二阶段后续轮次。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+# 如果 data/external 下缺少官方仓库，先克隆：
+git clone https://github.com/sierra-research/tau-bench.git data/external/tau-bench
+git clone https://github.com/sierra-research/tau2-bench.git data/external/tau2-bench
+
+# 第二阶段第一轮正式补验
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml
+
+# 第二阶段第二轮官方 tau2 real-data 小批量复验
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml
+
+cat runs/tau_retail_phase2_official_tau2_nomem_seed1/metrics.json
+tail -n 3 runs/tau_retail_phase2_official_tau2_nomem_seed1/runs.jsonl
+grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_nomem_seed1/trace_events.jsonl
+
+cat runs/tau_retail_phase2_official_tau2_raw_trace_rag_seed1/metrics.json
+head -n 3 runs/tau_retail_phase2_official_tau2_raw_trace_rag_seed1/memories.jsonl
+grep '"event_type": "retrieve"' runs/tau_retail_phase2_official_tau2_raw_trace_rag_seed1/memory_updates.jsonl
+```
+
+实验日志更新状态：
+
+1. `docs/experiment_log.md` 已补齐第二阶段第一轮在 `(rm)` 环境下的正式复验结果，记录 state fixture 的 no-memory/raw-trace-rag 指标、policy violation 和 raw trace 检索。
+2. `docs/experiment_log.md` 已新增 `tau_retail_phase2_official_tau2_seed1` 实验条目，记录官方 repo commit、官方 retail 数据规模、两组配置指标和 action mismatch 分类。
+3. 官方 no-memory/raw-trace 成功率为 0.0 的原因已记录为 actor 能力边界：mock actor 只能验证 adapter/evaluator 日志，不是官方 benchmark actor。
+4. raw-trace-rag 的 `memory_size=3`、逐轮 retrieve、token 成本增加和 `negative_transfer_rate=0.0` 修正口径已写入实验日志。
+
+下一步建议：
+
+1. 在官方 tau2 task 上接入一个可多步完成 expected actions 的 actor 或 action-replay oracle，用于把 adapter/evaluator 和真实模型能力解耦。
+2. 逐步对齐 tau2 官方 evaluator 的 `communicate_info`、`nl_assertions`、DB 终态和 policy violation，而不只依赖 action sequence。
+3. 针对官方前 3 条 exchange/return 任务继续补 mutation semantics，尤其是 `new_item_ids`、payment history、refund/exchange 状态字段与官方工具返回结构。
+4. 当 no-memory 官方小批量 reward 可解释且 actor 不再是主要 blocker 后，再迁移 `nt_memevo_gate`、support verification 和 scope refinement。
+
+## 第二阶段第三轮方向（更新）
+
+优先方向：实现官方 tau2 action-replay oracle / scripted expected-action actor，并补齐官方前 3 条 retail 任务需要的 tool/evaluator 语义。理由是第二阶段第二轮已经证明官方 task/DB loader、Raw Trace RAG 日志和 action mismatch 分类可运行；当前主要 blocker 是 mock actor 只能执行 0-1 步，无法验证官方多步 expected actions、DB state mutation 和自然语言断言。
+
+第三轮建议范围：
+
+1. 新增 `action_replay` 或 `scripted_expected_actions` actor/provider：从 `metadata.expected_actions` 逐步执行官方工具调用，生成可评估 trace，用来把 adapter/evaluator 问题和真实模型策略能力解耦。
+2. 在官方 tau2 前 3 条 base 任务上建立最小 oracle 配置，例如 `configs/tau_retail_phase2_official_tau2_action_replay.yaml`，默认 `max_tasks=3`，只用于语义对齐，不作为方法收益实验。
+3. 补齐官方 exchange 任务链路：`find_user_id_by_name_zip -> get_order_details -> get_product_details -> get_product_details -> exchange_delivered_order_items`，重点检查 `item_ids`、`new_item_ids`、product variant、替换商品选择和 order state update。
+4. 补齐官方 return/count 任务链路：多次 `get_order_details`、`get_product_details`、tshirt option count、`return_delivered_order_items`，重点检查返回 item 选择、订单状态、商品过滤和最终信息表达。
+5. 扩展 `official_like` evaluator：在 action sequence 之外开始映射 `communicate_info` / `nl_assertions`，并为 DB state mismatch、natural-language assertion mismatch、unsupported official criterion 分别记录 error type。
+6. 在 `runs.jsonl.evaluation_details` 中保留 expected-vs-actual action 对齐表、state diff summary、未支持 evaluator criterion 列表和官方原始 task id，避免后续真实 actor 失败只能看到笼统 `success=false`。
+7. 新增测试覆盖 tau2 nested action replay、官方 tool 参数规范化、exchange/return mutation state update、unsupported criterion 的可解释降级，以及第二阶段第二轮四个配置不回归。
+8. 第三轮暂不建议迁移 `nt_memevo_gate`、support verification、scope refinement 或真实 LLM actor；只有当 action-replay/oracle 能让官方小批量任务通过或输出明确 state/assertion mismatch 后，再进入真实 actor smoke。
+
+第三轮验收标准：
+
+1. `python -m pytest` 全量通过。
+2. `tau_retail_phase2_state_nomem.yaml` 和 `tau_retail_phase2_state_raw_trace_rag.yaml` 维持当前 `success_rate=0.6666666666666666` 和可解释 policy violation。
+3. `tau_retail_phase2_official_tau2_nomem.yaml` 与 `tau_retail_phase2_official_tau2_raw_trace_rag.yaml` 继续稳定生成 action mismatch 与 memory 日志，`negative_transfer_rate=0.0`。
+4. 新增 action-replay/oracle 配置至少能完整执行官方前 3 条任务的 expected action sequence；若 reward 仍失败，失败必须落到 state diff、natural-language assertion、unsupported criterion 或 tool semantic mismatch。
+5. 官方 tau2 artifacts 中每个失败任务都能在 `evaluation_details` 中解释“是 actor 少做/错做动作，还是工具语义/evaluator 尚未对齐”。

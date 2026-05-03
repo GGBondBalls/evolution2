@@ -136,7 +136,9 @@ class MockLLMClient(LLMClient):
             "get_user_details",
             "get_order_details",
             "get_product_details",
+            "get_item_details",
             "list_all_product_types",
+            "modify_user_address",
             "modify_pending_order_address",
             "modify_pending_order_payment",
             "modify_pending_order_items",
@@ -242,7 +244,7 @@ class MockLLMClient(LLMClient):
                 "args": {
                     "order_id": order_match.group(1).upper(),
                     "item_ids": [item_match.group(1)] if item_match else [],
-                    "product_ids": (
+                    "new_item_ids": (
                         [product_match_for_exchange.group(1)]
                         if product_match_for_exchange
                         else []
@@ -269,6 +271,14 @@ class MockLLMClient(LLMClient):
                 task_text,
                 flags=re.IGNORECASE,
             )
+        if product_match and "item" in lower_task and "product" not in lower_task:
+            return {
+                "thought": "The task asks for item variant details.",
+                "action": "tool",
+                "tool_name": "get_item_details",
+                "args": {"item_id": product_match.group(1)},
+            }
+
         if product_match and ("product" in lower_task or "item" in lower_task):
             return {
                 "thought": "The task asks for product details.",
@@ -296,6 +306,14 @@ class MockLLMClient(LLMClient):
                 "action": "tool",
                 "tool_name": "lookup_policy",
                 "args": {"policy_name": policy_name},
+            }
+
+        if "human agent" in lower_task or "human support" in lower_task:
+            return {
+                "thought": "The task asks to transfer the user to a human agent.",
+                "action": "tool",
+                "tool_name": "transfer_to_human_agents",
+                "args": {"summary": task_text[:200]},
             }
 
         return None

@@ -67,17 +67,19 @@ class TauBenchEnv(AgentEnv):
                 "get_user_details(user_id: str) -> customer profile, addresses, and order ids",
                 "get_order_details(order_id: str) -> order status, items, payment, and shipping details",
                 "get_product_details(product_id: str) -> product name, type, price, and variants",
+                "get_item_details(item_id: str) -> inventory variant details for a concrete item id",
                 "list_all_product_types() -> available product type names",
                 "lookup_policy(policy_name: str) -> retail policy text",
                 "calculate(expression: str) -> arithmetic result",
                 "think(thought: str) -> private reasoning note",
                 "transfer_to_human_agents(summary: str) -> escalate to a human support agent",
+                "modify_user_address(user_id: str, address1: str, address2: str, city: str, state: str, country: str, zip: str) -> update a user's default address",
                 "modify_pending_order_address(order_id: str, address: dict) -> update pending order shipping address",
                 "modify_pending_order_payment(order_id: str, payment_method_id: str) -> update pending order payment method",
-                "modify_pending_order_items(order_id: str, item_ids: list[str], product_ids: list[str]) -> update pending order items",
+                "modify_pending_order_items(order_id: str, item_ids: list[str], new_item_ids: list[str], payment_method_id: str) -> update pending order items",
                 "cancel_pending_order(order_id: str, reason: str) -> cancel a pending order",
-                "return_delivered_order_items(order_id: str, item_ids: list[str]) -> return delivered order items",
-                "exchange_delivered_order_items(order_id: str, item_ids: list[str], product_ids: list[str]) -> exchange delivered order items",
+                "return_delivered_order_items(order_id: str, item_ids: list[str], payment_method_id: str) -> return delivered order items",
+                "exchange_delivered_order_items(order_id: str, item_ids: list[str], new_item_ids: list[str], payment_method_id: str) -> exchange delivered order items",
             ]
         )
 
@@ -96,6 +98,8 @@ class TauBenchEnv(AgentEnv):
             result = self._get_order_details(args)
         elif tool_name == "get_product_details":
             result = self._get_product_details(args)
+        elif tool_name == "get_item_details":
+            result = self._get_item_details(args)
         elif tool_name == "list_all_product_types":
             result = self._list_all_product_types(args)
         elif tool_name == "lookup_policy":
@@ -110,6 +114,8 @@ class TauBenchEnv(AgentEnv):
                 args,
                 f"Transferred to human agents: {args.get('summary', '')}",
             )
+        elif tool_name == "modify_user_address":
+            result = self._modify_user_address(args)
         elif tool_name == "modify_pending_order_address":
             result = self._modify_order(
                 tool_name=tool_name,
@@ -193,6 +199,8 @@ class TauBenchEnv(AgentEnv):
             )
         order["status"] = "return_requested"
         order["return_item_ids"] = item_ids
+        if args.get("payment_method_id"):
+            order["return_payment_method_id"] = str(args["payment_method_id"])
         self._mark_order_items(order, item_ids, "return_requested")
         return ToolResult(
             "return_delivered_order_items",
@@ -204,7 +212,10 @@ class TauBenchEnv(AgentEnv):
         order_id = str(args.get("order_id") or "")
         item_ids = self._normalize_id_list(args.get("item_ids") or args.get("items") or args.get("item_id"))
         product_ids = self._normalize_id_list(
-            args.get("product_ids") or args.get("replacement_product_ids") or args.get("product_id")
+            args.get("new_item_ids")
+            or args.get("product_ids")
+            or args.get("replacement_product_ids")
+            or args.get("product_id")
         )
         order = self._get_order_record(order_id)
         if not order:
@@ -230,7 +241,11 @@ class TauBenchEnv(AgentEnv):
                 f"Order {self._clean_order_id(order_id)} does not contain item ids: {', '.join(missing_items)}.",
                 ok=False,
             )
-        missing_products = [product_id for product_id in product_ids if product_id not in self.db["products"]]
+        missing_products = [
+            product_id
+            for product_id in product_ids
+            if product_id not in self.db["products"] and self._find_item_variant(product_id) is None
+        ]
         if missing_products:
             return ToolResult(
                 "exchange_delivered_order_items",
@@ -241,6 +256,9 @@ class TauBenchEnv(AgentEnv):
         order["status"] = "exchange_requested"
         order["exchange_item_ids"] = item_ids
         order["exchange_product_ids"] = product_ids
+        order["exchange_new_item_ids"] = product_ids
+        if args.get("payment_method_id"):
+            order["exchange_payment_method_id"] = str(args["payment_method_id"])
         self._mark_order_items(order, item_ids, "exchange_requested")
         return ToolResult(
             "exchange_delivered_order_items",
@@ -262,12 +280,14 @@ class TauBenchEnv(AgentEnv):
         split_file = self.config.get("split_file") or self.config.get("tasks_file")
         if split_file:
             records = self._load_task_records_from_path(Path(str(split_file)))
+            records = self._filter_task_records(records, source=str(split_file))
             self._validate_task_records_if_requested(records, source=str(split_file))
             return records
 
         task_module = self.config.get("task_module")
         if task_module:
             records = self._load_task_records_from_module(str(task_module))
+            records = self._filter_task_records(records, source=str(task_module))
             self._validate_task_records_if_requested(records, source=str(task_module))
             return records
 
@@ -280,6 +300,7 @@ class TauBenchEnv(AgentEnv):
         for module_name in module_names:
             try:
                 records = self._load_task_records_from_module(module_name)
+                records = self._filter_task_records(records, source=module_name)
                 self._validate_task_records_if_requested(records, source=module_name)
                 return records
             except (ImportError, AttributeError, ValueError) as exc:
@@ -349,6 +370,74 @@ class TauBenchEnv(AgentEnv):
             normalized.append(record)
         return normalized
 
+    def _filter_task_records(self, records: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
+        filtered = list(records)
+        split_ids = self._configured_task_split_ids()
+        if split_ids is not None:
+            wanted = set(split_ids)
+            filtered = [
+                record
+                for record in filtered
+                if self._record_task_id(record) in wanted
+            ]
+            if not filtered:
+                raise ValueError(
+                    f"Tau-bench task split filter selected no records from {source}. "
+                    "Check benchmark.task_split_file and benchmark.task_split."
+                )
+
+        task_ids = self._configured_task_ids()
+        if task_ids is not None:
+            wanted = set(task_ids)
+            filtered = [
+                record
+                for record in filtered
+                if self._record_task_id(record) in wanted
+            ]
+            if not filtered:
+                raise ValueError(
+                    f"Tau-bench task_ids filter selected no records from {source}. "
+                    "Check benchmark.task_ids."
+                )
+        return filtered
+
+    def _configured_task_split_ids(self) -> list[str] | None:
+        split_path = self.config.get("task_split_file") or self.config.get("split_ids_file")
+        if not split_path:
+            return None
+        path = Path(str(split_path))
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Tau-bench task split file not found: {path}. "
+                "Set benchmark.task_split_file to a split JSON file such as tau2 split_tasks.json."
+            )
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"Tau-bench task split file {path} must be a JSON object.")
+        split_name = str(self.config.get("task_split", "base"))
+        if split_name not in data:
+            raise ValueError(
+                f"Tau-bench task split {split_name!r} was not found in {path}. "
+                f"Available splits: {sorted(data)}."
+            )
+        ids = data[split_name]
+        if not isinstance(ids, list):
+            raise ValueError(f"Tau-bench task split {split_name!r} in {path} must be a list.")
+        return [str(item) for item in ids]
+
+    def _configured_task_ids(self) -> list[str] | None:
+        raw_task_ids = self.config.get("task_ids")
+        if raw_task_ids is None:
+            return None
+        if isinstance(raw_task_ids, str):
+            return [part.strip() for part in raw_task_ids.split(",") if part.strip()]
+        if isinstance(raw_task_ids, list):
+            return [str(item) for item in raw_task_ids]
+        raise ValueError("benchmark.task_ids must be a comma-separated string or a list.")
+
+    def _record_task_id(self, record: dict[str, Any]) -> str:
+        return str(record.get("task_id") or record.get("id") or record.get("taskId") or "")
+
     def _validate_task_records_if_requested(
         self,
         records: list[dict[str, Any]],
@@ -362,37 +451,32 @@ class TauBenchEnv(AgentEnv):
                 "Expected at least one task record; see docs/tau_retail_export_schema.md."
             )
         for index, record in enumerate(records, start=1):
-            task_id = record.get("task_id") or record.get("id") or record.get("taskId") or f"#{index}"
-            instruction = (
-                record.get("instruction")
-                or record.get("user_instruction")
-                or record.get("query")
-                or record.get("message")
-            )
+            task_id = self._record_task_id(record) or f"#{index}"
+            instruction = self._instruction_from_record(record)
             if not isinstance(instruction, str) or not instruction.strip():
                 raise ValueError(
                     f"Tau-bench export task {task_id!r} in {source} is missing a non-empty "
-                    "instruction/user_instruction/query/message field."
+                    "instruction/user_instruction/query/message field or tau2 user_scenario.instructions."
                 )
 
-            expected = record.get("expected_answer_contains")
-            if expected is None:
-                expected = record.get("expected_answer")
+            expected = self._expected_answer_from_record(record)
             has_expected_answer = bool(self._normalize_expected_answer(expected))
-            raw_actions = record.get("actions") or record.get("expected_actions")
+            raw_actions = self._expected_actions_from_record(record)
             actions = self._normalize_actions(raw_actions)
             has_expected_state_diff = bool(
-                record.get("expected_state_diff")
-                or record.get("state_diff")
-                or record.get("expected_db_state")
+                self._expected_state_diff_from_record(record)
             )
-            if not has_expected_answer and not actions and not has_expected_state_diff:
+            has_official_criteria = bool(
+                isinstance(record.get("evaluation_criteria"), dict)
+                and record["evaluation_criteria"].get("reward_basis") is not None
+            )
+            if not has_expected_answer and not actions and not has_expected_state_diff and not has_official_criteria:
                 raise ValueError(
                     f"Tau-bench export task {task_id!r} in {source} must provide either "
                     "expected_answer_contains/expected_answer, actions/expected_actions, "
-                    "or expected_state_diff/state_diff/expected_db_state."
+                    "expected_state_diff/state_diff/expected_db_state, or tau2 evaluation_criteria."
                 )
-            if raw_actions is not None and not actions:
+            if raw_actions not in (None, []) and not actions:
                 raise ValueError(
                     f"Tau-bench export task {task_id!r} in {source} has actions/expected_actions "
                     "but no valid action records. Each action needs name/tool_name/action and "
@@ -421,27 +505,14 @@ class TauBenchEnv(AgentEnv):
         )
 
     def _task_from_record(self, record: dict[str, Any], index: int) -> Task:
-        task_id = str(
-            record.get("task_id")
-            or record.get("id")
-            or record.get("taskId")
-            or f"tau_retail_{index:04d}"
-        )
-        instruction = str(
-            record.get("instruction")
-            or record.get("user_instruction")
-            or record.get("query")
-            or record.get("message")
-            or ""
-        )
+        task_id = self._record_task_id(record) or f"tau_retail_{index:04d}"
+        instruction = self._instruction_from_record(record)
         if not instruction:
             raise ValueError(f"Tau-bench task {task_id} does not contain an instruction field.")
 
-        expected = record.get("expected_answer_contains")
-        if expected is None:
-            expected = record.get("expected_answer")
+        expected = self._expected_answer_from_record(record)
         expected_answer_contains = self._normalize_expected_answer(expected)
-        expected_actions = self._normalize_actions(record.get("actions") or record.get("expected_actions"))
+        expected_actions = self._normalize_actions(self._expected_actions_from_record(record))
         tool_names = record.get("tool_names") or [action["name"] for action in expected_actions]
 
         metadata = {
@@ -460,18 +531,86 @@ class TauBenchEnv(AgentEnv):
                 "expected_answer",
             }
         }
+        expected_state_diff = self._expected_state_diff_from_record(record)
+        if expected_state_diff and "expected_state_diff" not in metadata:
+            metadata["expected_state_diff"] = expected_state_diff
+        if "evaluation_criteria" in record:
+            metadata["source_format"] = "tau2_official"
         metadata["benchmark"] = "tau_bench"
         metadata["domain"] = metadata.get("domain", "retail")
         metadata["intent"] = metadata.get("intent") or self._infer_intent(instruction, tool_names)
         metadata["tool_names"] = list(tool_names) if isinstance(tool_names, list) else []
         metadata["expected_actions"] = expected_actions
-        metadata["no_memory_success"] = bool(metadata.get("no_memory_success", True))
+        default_no_memory_success = False if metadata.get("source_format") == "tau2_official" else True
+        metadata["no_memory_success"] = bool(
+            metadata.get("no_memory_success", default_no_memory_success)
+        )
         return Task(
             task_id=task_id,
             instruction=instruction,
             expected_answer_contains=expected_answer_contains,
             metadata=metadata,
         )
+
+    def _instruction_from_record(self, record: dict[str, Any]) -> str:
+        direct = (
+            record.get("instruction")
+            or record.get("user_instruction")
+            or record.get("query")
+            or record.get("message")
+        )
+        if isinstance(direct, str) and direct.strip():
+            return " ".join(direct.split())
+
+        instructions = {}
+        user_scenario = record.get("user_scenario")
+        if isinstance(user_scenario, dict):
+            candidate = user_scenario.get("instructions")
+            if isinstance(candidate, dict):
+                instructions = candidate
+        if not instructions:
+            return ""
+
+        parts = []
+        for key, label in (
+            ("task_instructions", "Task style"),
+            ("reason_for_call", "Customer request"),
+            ("known_info", "Known info"),
+            ("unknown_info", "Unknown info"),
+        ):
+            value = instructions.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(f"{label}: {' '.join(value.split())}")
+        return " ".join(parts)
+
+    def _expected_answer_from_record(self, record: dict[str, Any]) -> Any:
+        if "expected_answer_contains" in record:
+            return record.get("expected_answer_contains")
+        return record.get("expected_answer")
+
+    def _expected_actions_from_record(self, record: dict[str, Any]) -> Any:
+        actions = record.get("actions")
+        if actions is None:
+            actions = record.get("expected_actions")
+        if actions is not None:
+            return actions
+        criteria = record.get("evaluation_criteria")
+        if isinstance(criteria, dict):
+            return criteria.get("actions")
+        return None
+
+    def _expected_state_diff_from_record(self, record: dict[str, Any]) -> Any:
+        for key in ("expected_state_diff", "state_diff", "expected_db_state"):
+            value = record.get(key)
+            if value:
+                return value
+        criteria = record.get("evaluation_criteria")
+        if isinstance(criteria, dict):
+            for key in ("expected_state_diff", "state_diff", "expected_db_state"):
+                value = criteria.get(key)
+                if value:
+                    return value
+        return {}
 
     def _normalize_expected_answer(self, expected: Any) -> tuple[str, ...]:
         if expected is None:
@@ -662,6 +801,10 @@ class TauBenchEnv(AgentEnv):
             user_first = str(user.get("first_name") or "").lower()
             user_last = str(user.get("last_name") or "").lower()
             user_name = str(user.get("name") or f"{user_first} {user_last}").lower()
+            if (not user_first or not user_last) and user_name:
+                name_parts = user_name.split()
+                user_first = user_first or (name_parts[0] if name_parts else "")
+                user_last = user_last or (name_parts[-1] if len(name_parts) > 1 else "")
             user_zip = self._user_zip(user)
             name_match = (
                 (first_name and last_name and first_name == user_first and last_name == user_last)
@@ -707,6 +850,13 @@ class TauBenchEnv(AgentEnv):
         if not product:
             return ToolResult("get_product_details", args, f"Product {product_id} was not found.", ok=False)
         return ToolResult("get_product_details", args, self._compact_record(product))
+
+    def _get_item_details(self, args: dict[str, Any]) -> ToolResult:
+        item_id = str(args.get("item_id") or args.get("variant_id") or args.get("id") or "")
+        variant = self._find_item_variant(item_id)
+        if variant is None:
+            return ToolResult("get_item_details", args, f"Item {item_id} was not found.", ok=False)
+        return ToolResult("get_item_details", args, self._compact_record(variant))
 
     def _list_all_product_types(self, args: dict[str, Any]) -> ToolResult:
         product_types = sorted(
@@ -763,7 +913,12 @@ class TauBenchEnv(AgentEnv):
                 ok=False,
             )
         if field == "shipping_address":
-            value = args.get("address") or args.get("shipping_address") or args.get("new_address")
+            value = (
+                args.get("address")
+                or args.get("shipping_address")
+                or args.get("new_address")
+                or self._address_from_args(args)
+            )
         elif field == "payment_method_id":
             value = args.get("payment_method_id") or args.get("new_payment_method_id")
         elif field == "items":
@@ -778,11 +933,29 @@ class TauBenchEnv(AgentEnv):
                 ok=False,
             )
         order[field] = value
+        if field == "items" and args.get("new_item_ids"):
+            order["status"] = "pending (item modified)"
         return ToolResult(
             tool_name,
             args,
             f"Order {self._clean_order_id(order_id)} {field} updated.",
         )
+
+    def _modify_user_address(self, args: dict[str, Any]) -> ToolResult:
+        user_id = str(args.get("user_id") or args.get("customer_id") or "")
+        user = self.db["users"].get(user_id)
+        if not user:
+            return ToolResult("modify_user_address", args, f"User {user_id} was not found.", ok=False)
+        address = self._address_from_args(args) or args.get("address") or args.get("shipping_address")
+        if not isinstance(address, dict):
+            return ToolResult(
+                "modify_user_address",
+                args,
+                "No valid address fields were provided.",
+                ok=False,
+            )
+        user["address"] = address
+        return ToolResult("modify_user_address", args, f"User {user_id} address updated.")
 
     def _set_order_status(
         self,
@@ -816,6 +989,24 @@ class TauBenchEnv(AgentEnv):
         )
 
     def _updated_order_items(self, order: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
+        item_ids = self._normalize_id_list(args.get("item_ids") or args.get("item_id"))
+        new_item_ids = self._normalize_id_list(args.get("new_item_ids") or args.get("new_item_id"))
+        if item_ids and new_item_ids:
+            updated_items = [dict(item) for item in order.get("items", []) if isinstance(item, dict)]
+            for old_item_id, new_item_id in zip(item_ids, new_item_ids):
+                variant = self._find_item_variant(new_item_id)
+                for item in updated_items:
+                    current_item_id = str(item.get("item_id") or item.get("id") or "")
+                    if current_item_id == old_item_id:
+                        item["item_id"] = new_item_id
+                        if variant is not None:
+                            item["product_id"] = variant.get("product_id", item.get("product_id"))
+                            item["price"] = variant.get("price", item.get("price"))
+                            if "options" in variant:
+                                item["options"] = variant["options"]
+                        break
+            return updated_items
+
         product_ids = self._normalize_id_list(args.get("product_ids") or args.get("product_id"))
         if not product_ids:
             items = args.get("items")
@@ -833,6 +1024,12 @@ class TauBenchEnv(AgentEnv):
                 base["name"] = product["name"]
             updated.append(base)
         return updated
+
+    def _address_from_args(self, args: dict[str, Any]) -> dict[str, Any] | None:
+        address_keys = ("address1", "address2", "city", "state", "country", "zip")
+        if not any(key in args for key in address_keys):
+            return None
+        return {key: args.get(key, "") for key in address_keys}
 
     def _normalize_id_list(self, value: Any) -> list[str]:
         if value is None:
@@ -860,6 +1057,23 @@ class TauBenchEnv(AgentEnv):
         for item in order.get("items", []):
             if isinstance(item, dict) and str(item.get("item_id") or item.get("id") or "") in wanted:
                 item["status"] = status
+
+    def _find_item_variant(self, item_id: str) -> dict[str, Any] | None:
+        item_id = str(item_id or "")
+        if not item_id:
+            return None
+        for product_id, product in self.db["products"].items():
+            variants = product.get("variants")
+            if not isinstance(variants, dict):
+                continue
+            variant = variants.get(item_id)
+            if isinstance(variant, dict):
+                item = dict(variant)
+                item.setdefault("item_id", item_id)
+                item.setdefault("product_id", product_id)
+                item.setdefault("product_name", product.get("name"))
+                return item
+        return None
 
     def _compact_record(self, record: dict[str, Any]) -> str:
         return json.dumps(record, ensure_ascii=False, sort_keys=True)
@@ -1143,7 +1357,7 @@ class TauBenchEnv(AgentEnv):
             key_lower = key.lower()
             if key_lower in {"order_id", "orderid"} or key_lower.endswith("_order_id"):
                 return self._clean_order_id(text).lower()
-            if key_lower.endswith("_id") or key_lower in {"item_ids", "product_ids"}:
+            if key_lower.endswith("_id") or key_lower in {"item_ids", "product_ids", "new_item_ids"}:
                 return text.strip("#").lower()
             return text.lower()
         return value
@@ -1338,6 +1552,7 @@ class TauBenchEnv(AgentEnv):
             "cancel_pending_order",
             "return_delivered_order_items",
             "exchange_delivered_order_items",
+            "modify_user_address",
         }
         violations = []
         for error in tool_semantic_errors:

@@ -36,6 +36,54 @@ Set `validate_export_schema: true` for exported samples. This catches missing
 instructions, missing expected outcomes, empty task files, and DB files without
 the required retail sections before the agent loop starts.
 
+## Official Tau2/Tau-Three Checkout
+
+The original `sierra-research/tau-bench` repository currently warns that its
+task files are outdated and points users to `sierra-research/tau2-bench` for the
+updated tau-three task set. For phase-two real-data probes, clone both
+repositories under the ignored external data directory:
+
+```bash
+git clone https://github.com/sierra-research/tau-bench.git data/external/tau-bench
+git clone https://github.com/sierra-research/tau2-bench.git data/external/tau2-bench
+```
+
+The phase-two official configs read the updated retail files directly:
+
+```yaml
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: data/external/tau2-bench/data/tau2/domains/retail/tasks.json
+  task_split_file: data/external/tau2-bench/data/tau2/domains/retail/split_tasks.json
+  task_split: base
+  data_file: data/external/tau2-bench/data/tau2/domains/retail/db.json
+  evaluation: official_like
+  compare_action_args: true
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 3
+```
+
+`tasks.json` in tau2-bench uses the official nested shape:
+`user_scenario.instructions` for user instructions and
+`evaluation_criteria.actions` for expected tool calls. `TauBenchEnv` converts
+that nested structure into the project `Task` format while preserving the raw
+`evaluation_criteria` in task metadata. `task_split_file` can point to
+`split_tasks.json`, and `task_split` may be `base`, `train`, or `test`.
+
+For minimal debugging, either lower `max_tasks` to `1` or add:
+
+```yaml
+benchmark:
+  task_ids: ["0"]
+```
+
+Official tau2 records do not provide a known no-memory baseline for this
+project's mock actor. Unless an export explicitly sets `no_memory_success`,
+official tau2 tasks default it to `false` to avoid mislabeling ordinary
+no-memory failures as negative transfer in memory baselines.
+
 ## Task Records
 
 Each task record must be a JSON/Python mapping. The adapter accepts common
@@ -193,17 +241,19 @@ Phase one implements the tools needed for smoke and small exported samples:
 3. `get_user_details`
 4. `get_order_details`
 5. `get_product_details`
-6. `list_all_product_types`
-7. `lookup_policy`
-8. `calculate`
-9. `think`
-10. `transfer_to_human_agents`
-11. `modify_pending_order_address`
-12. `modify_pending_order_payment`
-13. `modify_pending_order_items`
-14. `cancel_pending_order`
-15. `return_delivered_order_items`
-16. `exchange_delivered_order_items`
+6. `get_item_details`
+7. `list_all_product_types`
+8. `lookup_policy`
+9. `calculate`
+10. `think`
+11. `transfer_to_human_agents`
+12. `modify_user_address`
+13. `modify_pending_order_address`
+14. `modify_pending_order_payment`
+15. `modify_pending_order_items`
+16. `cancel_pending_order`
+17. `return_delivered_order_items`
+18. `exchange_delivered_order_items`
 
 The mutation tools are minimal state updates, not a full official tau-bench
 retail simulator. Phase two currently supports task-level DB reset, pending
