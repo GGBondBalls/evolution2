@@ -1859,3 +1859,84 @@ grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_re
 2. 真实 actor `max_tasks=1` 不再因“漏写 action 但有明确工具意图”直接丢失原始响应；要么被可审计 repair，要么在 trace 中保留 raw response 和不可修复原因。
 3. 若 repair 后 task 0 继续推进到 `get_order_details` 或更深工具链，记录新的 failure taxonomy；若仍失败，必须能从日志看到原始模型输出。
 4. 不扩大到 memory 方法收益实验；第六轮仍只服务于 official real actor 输出协议和 failure taxonomy 稳定。
+
+## 2026-05-05 第二阶段第六轮
+
+目标：落实真实 actor 输出协议加固与可审计 raw model response 日志，解决第五轮本地 Qwen/vLLM real actor 在 task `0` 第二步“模型意图正确但漏写/错写 action 后直接 `unsupported_action`，且 trace 中缺少 raw response”的诊断缺口。
+
+已完成编码：
+
+1. 修改 `src/ntmemevo/agents/react_agent.py`，为成功 JSON 解析后的 `model_decision` 增加 `repair_status`、`repair_reason`，并在 `logging.save_raw_model_io=true` 时写入 `raw_response` 和 `parsed_decision`。
+2. 对无效 action 或不可修复的缺失 action，即使未开启 raw IO，也会在 `model_decision` 中保留 `raw_response` 与 `parsed_decision`，避免真实 actor 失败时只看到空 action。
+3. 新增保守 action repair：当模型输出缺失 `action`，但存在可识别的字符串 `tool_name` 或 `tool`，且存在 dict 类型 `args` 或 `arguments` 时，修复为 `action=tool`。
+4. action repair 写入独立 `model_action_repair` trace event，字段包括 `repair_reason`、`raw_response`、`parsed_decision`、`repaired_decision`、`action_before`、`action_after`、`tool_name` 和 `args`。
+5. 对 `action=tool` 但使用兼容字段 `tool` / `arguments` 的输出，也会规范化为内部 `tool_name` / `args`，并在发生字段规范化时记录 repair。
+6. 对 JSON 根对象不是 dict 的响应新增 `model_parse_error` 记录，`parse_error=json_root_not_object`，避免 list/string JSON 触发未解释异常。
+7. 强化 `ReActToolAgent` prompt 协议：明确每轮必须只返回一个 JSON object；必须包含 `action`；tool call 必须包含 `tool_name` 和 `args`；不得只返回 thought。
+8. 修改 `src/ntmemevo/experiments/run_stream.py`，把配置中的 `logging.save_raw_model_io` 传入 `ReActToolAgent`，使 raw model response 日志开关由现有 logging 配置控制。
+9. 新增 `tests/test_react_agent.py`，覆盖合法 tool action 不变、缺失 action 但含 `tool`/`arguments` 可修复、缺失 action 且无工具字段不可修复、raw response 日志字段写出。
+10. 更新 `README.md` 的 Next Milestone，说明第六轮 real actor protocol hardening、`model_action_repair` 事件和复验顺序。
+
+关键实现说明：
+
+1. 本轮 repair 策略刻意保守，不从 `thought` 文本中猜测工具名或参数；若模型只写“我应该调用 get_order_details”但没有结构化 `tool_name`/`tool` 和 dict 参数，仍按 `unsupported_action` 失败，只是 trace 会保留 raw response 与不可修复原因。
+2. `model_action_repair` 只代表输出协议修复，不代表 evaluator 成功；修复后任务可能继续暴露 action mismatch、参数错误、tool observation error、communicate/nl assertion failure 或 max steps 等更深层失败。
+3. 本轮不修改 tau evaluator、tool semantics、memory、replay、verification 或 negative-transfer 逻辑；目标只是在真实 actor no-memory 阶段把输出协议失败变成可审计、可复验的 failure taxonomy。
+4. prompt 协议加固会增加少量 prompt tokens；后续实验比较必须以第六轮后的日志为准，不与第五轮真实 actor token 数直接做严格同配置比较。
+
+本地验证：
+
+1. `conda run -n rm python -m py_compile src/ntmemevo/agents/react_agent.py src/ntmemevo/experiments/run_stream.py tests/test_react_agent.py` 通过。
+2. `conda run -n rm python -m pytest tests/test_react_agent.py -q` 通过：`3 passed in 0.02s`。
+3. `conda run -n rm python -m pytest -q` 通过：`40 passed in 0.14s`。
+4. `conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` 通过。
+5. action-replay scan10 结果保持稳定：`num_tasks=10`、`success_rate=1.0`、`expected_actions_matched_count=10`、`expected_actions_failed_count=0`、`tool_observation_error_count=3`、`expected_negative_observation_count=3`、`tool_semantic_error_count=0`、`communicate_info_passed_count=3`、`nl_assertion_passed_count=3`、`unsupported_official_criteria_count=0`、`negative_transfer_rate=0.0`。
+6. `curl --max-time 2 -s http://127.0.0.1:8000/v1/models` 返回连接失败，本编码环境当前没有运行 vLLM 服务；因此未运行 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的真实 actor smoke。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+# 不依赖 GPU 的 action-replay fallback，确认第六轮 parser 改动不影响 oracle/evaluator 口径：
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/metrics.json
+grep '"expected_negative_observations"' runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/runs.jsonl
+grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/runs.jsonl
+
+# 真实 Qwen/vLLM actor：先在独立终端启动服务。
+pip install -e ".[dev,vllm]"
+CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.85 MAX_MODEL_LEN=4096 \
+  bash scripts/start_vllm_qwen35_9b.sh
+
+# 另一个终端运行 healthcheck 与 max_tasks=1 smoke。
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+curl http://127.0.0.1:8000/v1/models
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/metrics.json
+tail -n 1 runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/runs.jsonl
+grep '"event_type": "model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl || true
+grep '"event_type": "model_decision"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl | tail -n 5
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl || true
+```
+
+实验日志填写建议：
+
+1. 若真实 actor 修复后仍失败，优先记录 `trace_events.jsonl` 中最后一条 `model_decision` 的 `repair_status`、`repair_reason`、`raw_response`、`parsed_decision`，以及是否出现 `model_action_repair`。
+2. 若 task `0` 能推进到 `get_order_details` 或更深工具链，记录新的失败类型，例如 action args mismatch、missing expected action、max steps、tool observation error、communicate/nl assertion failure。
+3. 若出现 `model_action_repair`，需确认 repair 是协议字段修复，而不是从 thought 中猜测动作；本轮不允许把不可结构化输出强行解释为工具调用。
+4. 若 vLLM/GPU 暂不可用，则填写 action-replay scan10 compatibility summary，并明确其不是真实 actor 结果。
+
+当前边界：
+
+1. 本轮没有运行真实 actor，因为当前编码环境没有 vLLM 服务监听 `127.0.0.1:8000`；真实 actor smoke 需用户启动本地 Qwen/vLLM 后复验。
+2. 本轮 repair 不解决模型多步规划能力、参数选择、工具顺序、终止条件或自然语言回答质量，只解决结构化输出协议的可审计修复。
+3. `nt_memevo_gate`、raw-trace real actor、support verification、scope refinement 和 memory 方法收益实验仍继续暂缓。
+
+下一步建议：
+
+1. 用户启动 vLLM 后，先复验 `tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的 `max_tasks=1`，重点检查是否出现 `model_action_repair`，以及是否能越过第五轮第二步 `unsupported_action`。
+2. 若 task `0` 仍失败但 raw response 已可审计，则按 failure taxonomy 继续修 parser/prompt 或模型输出约束；若 task `0` 能稳定完成或失败更深层，再扩到 `max_tasks=3`。
+3. 真实 no-memory actor failure taxonomy 稳定后，再新增 `tau_retail_phase2_official_tau2_real_actor_raw_trace_rag.yaml` 小样本；在 no-memory/raw-trace 都可解释前，不进入 NT-MemEvo gate 或 replay/verification 主实验。

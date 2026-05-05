@@ -393,18 +393,28 @@ pytest
 
 ## Next Milestone
 
-Phase two round five introduces the local Qwen/vLLM real-actor smoke while
-keeping adapter/evaluator alignment separate from memory-method claims:
+Phase two round six hardens the local Qwen/vLLM real-actor output protocol
+before expanding official tau2 samples:
 
-1. Start with `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`
-   at `max_tasks=1`, then raise to `max_tasks=3` only after failures are
-   explainable through action/state/communicate/nl/tool taxonomy.
-2. Use `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` as
+1. `ReActToolAgent` records raw parsed model decisions when
+   `logging.save_raw_model_io=true`; invalid decisions also keep raw response
+   text even when raw IO logging is disabled.
+2. The prompt now states a stricter output contract: each assistant message
+   must be exactly one JSON object with `action`, and tool calls must include
+   `tool_name` and `args`.
+3. Conservative action repair handles the common real-actor case where the
+   model emits a recognizable `tool`/`tool_name` plus dict `args`/`arguments`
+   but omits `action`; repairs are logged as `model_action_repair` events.
+4. Continue to start with
+   `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` at
+   `max_tasks=1`; raise to `max_tasks=3` only after failures are explainable
+   through action/state/communicate/nl/tool taxonomy.
+5. Use `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` as
    the fallback compatibility scan when the vLLM service is unavailable or GPU
    scheduling is blocked.
-3. Keep `nt_memevo_gate`, support verification, and scope refinement out of the
+6. Keep `nt_memevo_gate`, support verification, and scope refinement out of the
    official tau2 main path until real no-memory and raw-trace actor failures are
    stable and explainable.
-4. Keep the first-stage regression matrix green, especially tiny refinement,
+7. Keep the first-stage regression matrix green, especially tiny refinement,
    unsafe polluted negative transfer, phase-two state fixture, and official
    tau2 no-memory/raw-trace/action-replay probes.

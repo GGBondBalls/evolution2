@@ -56,6 +56,7 @@ def run(config_path: str) -> dict[str, Any]:
             model_config=actor_config,
             max_steps=max_steps,
             memory_top_k=int(config.agent.get("memory_top_k", 0)),
+            log_raw_model_io=bool(config.logging.get("save_raw_model_io", False)),
         )
         run_agent_label = "react_tool_agent"
     else:

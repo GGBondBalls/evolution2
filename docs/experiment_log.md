@@ -2618,8 +2618,95 @@ grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_
 
 ### 结果
 
-待填写。编码阶段本地验证参考值为：`37 passed`，scan10 `success_rate=1.0`、`expected_actions_matched_count=10`、`tool_observation_error_count=3`、`expected_negative_observation_count=3`、`tool_semantic_error_count=0`、`communicate_info_passed_count=3`、`nl_assertion_passed_count=3`、`unsupported_official_criteria_count=0`。
+待填写。第二阶段第六轮编码阶段本地验证参考值为：`40 passed`，scan10 `success_rate=1.0`、`expected_actions_matched_count=10`、`tool_observation_error_count=3`、`expected_negative_observation_count=3`、`tool_semantic_error_count=0`、`communicate_info_passed_count=3`、`nl_assertion_passed_count=3`、`unsupported_official_criteria_count=0`。
 
 ### 现象与问题
 
 待填写。该实验是 action-replay oracle 兼容性扫描，用于在真实 actor/vLLM 服务不可用时继续检查官方数据、工具 observation taxonomy 和 evaluator 口径；不代表真实 LLM actor 能力，也不代表 memory 方法收益。
+
+## tau_retail_phase2_official_tau2_real_actor_nomem_seed1 第六轮输出协议加固复验待填
+
+### 实验名称
+
+`tau_retail_phase2_official_tau2_real_actor_nomem_seed1_round6_protocol_hardening`
+
+### 日期与环境
+
+待填写。建议记录 Linux 机器标识、conda 环境 `rm`、Python/pytest/vLLM 版本、`VLLM_BASE_URL`、GPU 编号、`TENSOR_PARALLEL_SIZE`、`MAX_MODEL_LEN`、`GPU_MEMORY_UTILIZATION`。
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev,vllm]"
+python -m pytest
+
+# 终端 1：启动本地 Qwen/vLLM 服务。若单卡 OOM，使用双卡或降低 MAX_MODEL_LEN。
+CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.85 MAX_MODEL_LEN=4096 \
+  bash scripts/start_vllm_qwen35_9b.sh
+
+# 终端 2：健康检查与真实 actor smoke。
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+curl http://127.0.0.1:8000/v1/models
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml
+
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/metrics.json
+tail -n 1 runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/runs.jsonl
+grep '"event_type": "model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl || true
+grep '"event_type": "model_decision"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl | tail -n 5
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl || true
+grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl
+```
+
+### 配置文件
+
+`configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`
+
+关键参数：`benchmark.task_split=base`，`benchmark.max_tasks=1`，`benchmark.evaluation=official_like`，`agent.type=react_tool_agent`，`agent.max_steps=16`，`models.actor.provider=vllm`，`models.actor.model=qwen3.5-9b`，`models.actor.base_url_env=VLLM_BASE_URL`，`temperature=0.0`，`logging.save_raw_model_io=true`，`memory_policy=none`。
+
+### 输出目录
+
+`runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/`
+
+### 结果
+
+待填写。建议至少记录以下字段：
+
+```json
+{
+  "num_tasks": null,
+  "success_rate": null,
+  "avg_steps": null,
+  "avg_prompt_tokens": null,
+  "avg_completion_tokens": null,
+  "avg_tool_calls": null,
+  "expected_actions_matched_count": null,
+  "expected_actions_failed_count": null,
+  "tool_observation_error_count": null,
+  "expected_negative_observation_count": null,
+  "policy_violation_count": null,
+  "tool_semantic_error_count": null,
+  "unsupported_official_criteria_count": null,
+  "evaluator_error_types": {}
+}
+```
+
+### 抽查重点
+
+1. `trace_events.jsonl` 是否出现 `model_action_repair`。
+2. 若出现 repair，记录 `repair_reason`、`action_before`、`action_after`、`tool_name`、`args`，并确认 repair 来自结构化 `tool`/`tool_name` 和 dict `args`/`arguments`，不是从 thought 中猜测。
+3. 若仍出现 `unsupported_action`，记录最后一条 `model_decision` 的 `repair_status`、`repair_reason`、`raw_response` 和 `parsed_decision`。
+4. 若 task `0` 越过第五轮第二步，记录新的工具链深度：是否调用 `get_order_details`，是否继续调用 `get_product_details`，是否最终调用 `exchange_delivered_order_items`。
+5. 若失败类型变化，记录 `runs.jsonl.evaluation_details` 中的 action/state/communicate/nl/tool taxonomy。
+
+### 现象与问题
+
+待填写。重点判断第六轮是否解决第五轮“第二步 action 为空但 raw response 不可审计”的问题：
+
+1. 如果 repair 生效并推进到更深工具链，本轮通过输出协议加固验收，下一步可分析新的失败 taxonomy。
+2. 如果仍失败但 raw response、parsed decision 和不可修复原因可见，本轮也满足诊断验收，下一步应根据原始输出调整 prompt 或 parser。
+3. 如果 trace 中仍缺 raw response 或 repair 字段，说明第六轮日志验收未通过，应先修 trace 再扩样本。
+
+### 下一步
+
+待填写。默认建议：只有 `max_tasks=1` 的失败已经可审计并且不再停留在第五轮同一 `unsupported_action` 黑盒状态后，才将 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的 `benchmark.max_tasks` 临时改为 `3` 复验。raw-trace-rag、`nt_memevo_gate`、support verification 和 memory 方法收益实验继续暂缓。
