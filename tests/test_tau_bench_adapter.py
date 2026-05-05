@@ -7,6 +7,7 @@ import pytest
 
 from ntmemevo.envs.tau_bench import TauBenchEnv
 from ntmemevo.experiments.run_stream import run
+from ntmemevo.types import Task
 
 
 def _write_tau_retail_config(
@@ -614,6 +615,128 @@ logging:
     assert any(record["event_type"] == "scripted_action" for record in trace_records)
 
 
+def test_tau2_expected_read_tool_error_is_classified_as_negative_observation(
+    tmp_path: Path,
+) -> None:
+    tasks_path = tmp_path / "official_expected_negative_tasks.json"
+    tasks_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "expected_negative_lookup",
+                    "user_scenario": {
+                        "instructions": {
+                            "reason_for_call": "Look up an unavailable product id.",
+                            "known_info": "No other information is needed.",
+                        }
+                    },
+                    "evaluation_criteria": {
+                        "actions": [
+                            {
+                                "action_id": "neg_0",
+                                "name": "get_product_details",
+                                "arguments": {"product_id": "6086499569"},
+                            }
+                        ],
+                        "reward_basis": ["DB"],
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "runs" / "expected_negative_lookup"
+    config_path = tmp_path / "expected_negative_lookup.yaml"
+    config_path.write_text(
+        f"""
+experiment:
+  name: expected_negative_lookup_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: {tasks_path.as_posix()}
+  data_dir: data/tau_bench/retail_phase2_state
+  evaluation: official_like
+  compare_action_args: true
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 1
+agent:
+  type: action_replay_agent
+  max_steps: 4
+  memory_top_k: 0
+models:
+  actor:
+    provider: action_replay
+    model: scripted-expected-actions
+    temperature: 0.0
+    max_tokens: 0
+logging:
+  save_raw_model_io: false
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["success_rate"] == 1.0
+    assert metrics["expected_actions_matched_count"] == 1
+    assert metrics["tool_observation_error_count"] == 1
+    assert metrics["expected_negative_observation_count"] == 1
+    assert metrics["policy_violation_count"] == 0
+    assert metrics["tool_semantic_error_count"] == 0
+
+    run_record = json.loads((output_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    details = run_record["evaluation_details"]
+    assert run_record["success"] is True
+    assert run_record["error_type"] is None
+    assert details["expected_negative_observations"][0]["tool_name"] == "get_product_details"
+    assert details["expected_negative_observations"][0]["classification"] == (
+        "expected_negative_observation"
+    )
+    assert details["expected_actual_action_alignment"][0]["actual_ok"] is False
+    assert "was not found" in details["expected_actual_action_alignment"][0]["actual_observation"]
+
+
+def test_tau2_unexpected_read_tool_error_remains_tool_semantic_error() -> None:
+    env = TauBenchEnv(
+        {
+            "name": "tau_bench",
+            "domain": "retail",
+            "split_file": "data/task_splits/tau_retail_phase2_state_tasks.py",
+            "data_dir": "data/tau_bench/retail_phase2_state",
+            "evaluation": "official_like",
+            "compare_action_args": True,
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+    task = Task(
+        task_id="unexpected_negative_lookup",
+        instruction="Call a product lookup that is not part of the gold actions.",
+        metadata={"expected_actions": []},
+    )
+
+    env.start_task(task)
+    tool_result = env.call_tool("get_product_details", {"product_id": "6086499569"})
+    success, reward, error_type = env.evaluate(task, tool_result.observation)
+
+    assert success is False
+    assert reward == 0.0
+    assert error_type == "tool_semantic_error"
+    assert env.last_evaluation_detail["tool_observation_error_count"] == 1
+    assert env.last_evaluation_detail["expected_negative_observation_count"] == 0
+    assert env.last_evaluation_detail["tool_semantic_error_count"] == 1
+    assert env.last_evaluation_detail["tool_semantic_errors"][0]["classification"] == (
+        "tool_semantic_error"
+    )
+
+
 def test_tau2_official_like_reports_unsupported_criteria(tmp_path: Path) -> None:
     tasks_path = tmp_path / "official_unsupported_tasks.json"
     tasks_path.write_text(
@@ -1051,7 +1174,9 @@ def test_tau_retail_phase2_state_config_logs_evaluator_details(tmp_path: Path) -
     assert metrics["state_diff_evaluated_count"] == 1
     assert metrics["state_diff_passed_count"] == 1
     assert metrics["policy_violation_count"] == 1
-    assert metrics["tool_semantic_error_count"] == 1
+    assert metrics["tool_observation_error_count"] == 1
+    assert metrics["expected_negative_observation_count"] == 0
+    assert metrics["tool_semantic_error_count"] == 0
     assert metrics["evaluator_error_types"] == {"policy_violation": 1}
 
     run_records = [
@@ -1073,6 +1198,8 @@ def test_tau_retail_phase2_state_config_logs_evaluator_details(tmp_path: Path) -
     assert policy_fail_record["success"] is False
     assert policy_fail_record["error_type"] == "policy_violation"
     assert policy_fail_record["evaluation_details"]["policy_violation_count"] == 1
+    assert policy_fail_record["evaluation_details"]["tool_observation_error_count"] == 1
+    assert policy_fail_record["evaluation_details"]["tool_semantic_error_count"] == 0
     assert policy_fail_record["evaluation_details"]["expected_actions_matched"] is True
 
 

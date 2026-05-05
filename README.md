@@ -325,12 +325,17 @@ nl_assertion_mismatches
 unsupported_official_criteria
 policy_violation_count
 policy_violations
+tool_observation_error_count
+tool_observation_errors
+expected_negative_observation_count
+expected_negative_observations
 tool_semantic_error_count
 tool_semantic_errors
 ```
 
 `metrics.json` also includes `with_memory_fail_no_memory_success`, `negative_transfer_rate`, `harmful_memory_ids`, and gate acceptance/rejection counts.
-Tau-retail evaluator-alignment runs additionally report `evaluation_modes`, `state_diff_evaluated_count`, `state_diff_passed_count`, `state_diff_failed_count`, `expected_actions_evaluated_count`, `expected_actions_matched_count`, `expected_actions_failed_count`, `communicate_info_evaluated_count`, `communicate_info_passed_count`, `nl_assertion_evaluated_count`, `nl_assertion_passed_count`, `unsupported_official_criteria_count`, `policy_violation_count`, `tool_semantic_error_count`, and `evaluator_error_types`.
+Tau-retail evaluator-alignment runs additionally report `evaluation_modes`, `state_diff_evaluated_count`, `state_diff_passed_count`, `state_diff_failed_count`, `expected_actions_evaluated_count`, `expected_actions_matched_count`, `expected_actions_failed_count`, `communicate_info_evaluated_count`, `communicate_info_passed_count`, `nl_assertion_evaluated_count`, `nl_assertion_passed_count`, `unsupported_official_criteria_count`, `policy_violation_count`, `tool_observation_error_count`, `expected_negative_observation_count`, `tool_semantic_error_count`, and `evaluator_error_types`.
+`tool_observation_error_count` counts every `ok=false` tool result, while `expected_negative_observation_count` separates matched expected read lookups that return a negative observation under official tau2 action-replay. `tool_semantic_error_count` is reserved for remaining non-policy, non-expected tool failures.
 For structured candidate-memory runs it additionally reports utility update counts and lifecycle counts:
 `utility_update_count`, `utility_helpful_count`, `utility_harmful_count`, `candidate_memory_count`, `active_memory_count`, and `quarantined_memory_count`.
 Replay-enabled runs additionally report `replay_result_count`, `replay_leave_one_count`, `replay_helpful_count`, `replay_harmful_count`, `replay_neutral_count`, `replay_utility_update_count`, `online_proxy_utility_update_count`, and `utility_credit_sources`.

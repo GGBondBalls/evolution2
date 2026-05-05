@@ -52,6 +52,8 @@ class TauBenchEnv(AgentEnv):
             "state_diff_passed": None,
             "expected_actions_matched": None,
             "policy_violation_count": 0,
+            "tool_observation_error_count": 0,
+            "expected_negative_observation_count": 0,
             "tool_semantic_error_count": 0,
         }
 
@@ -1268,12 +1270,9 @@ class TauBenchEnv(AgentEnv):
         expected_state_diff = self._expected_state_diff(task)
         action_detail = self._compare_actions(expected_actions)
         state_detail = self._compare_state_diff(expected_state_diff)
-        tool_semantic_errors = self._tool_semantic_errors()
-        policy_violations = self._policy_violations(tool_semantic_errors)
-        non_policy_tool_errors = self._non_policy_tool_semantic_errors(
-            tool_semantic_errors=tool_semantic_errors,
-            policy_violations=policy_violations,
-        )
+        tool_observation_detail = self._classify_tool_observations(action_detail)
+        policy_violations = tool_observation_detail["policy_violations"]
+        tool_semantic_errors = tool_observation_detail["tool_semantic_errors"]
         communicate_detail = self._evaluate_communicate_info(task, final_answer)
         nl_assertion_detail = self._evaluate_nl_assertions(task, final_answer)
         unsupported_official_criteria = self._unsupported_official_criteria(
@@ -1329,7 +1328,7 @@ class TauBenchEnv(AgentEnv):
             success = (
                 all(checks)
                 and not unexpected_policy_violations
-                and not non_policy_tool_errors
+                and not tool_semantic_errors
                 and not unsupported_official_criteria
             )
             error_type = self._official_like_error_type(
@@ -1337,7 +1336,7 @@ class TauBenchEnv(AgentEnv):
                 action_detail=action_detail,
                 state_detail=state_detail,
                 policy_violations=unexpected_policy_violations,
-                tool_semantic_errors=non_policy_tool_errors,
+                tool_semantic_errors=tool_semantic_errors,
                 communicate_detail=communicate_detail,
                 nl_assertion_detail=nl_assertion_detail,
                 unsupported_official_criteria=unsupported_official_criteria,
@@ -1374,6 +1373,16 @@ class TauBenchEnv(AgentEnv):
             "unsupported_official_criteria_count": len(unsupported_official_criteria),
             "policy_violation_count": len(policy_violations),
             "policy_violations": policy_violations,
+            "tool_observation_error_count": len(
+                tool_observation_detail["tool_observation_errors"]
+            ),
+            "tool_observation_errors": tool_observation_detail["tool_observation_errors"],
+            "expected_negative_observation_count": len(
+                tool_observation_detail["expected_negative_observations"]
+            ),
+            "expected_negative_observations": tool_observation_detail[
+                "expected_negative_observations"
+            ],
             "tool_semantic_error_count": len(tool_semantic_errors),
             "tool_semantic_errors": tool_semantic_errors,
         }
@@ -1419,30 +1428,6 @@ class TauBenchEnv(AgentEnv):
             or task.metadata.get("expect_policy_violation")
             or task.metadata.get("allow_policy_violation")
         )
-
-    def _non_policy_tool_semantic_errors(
-        self,
-        tool_semantic_errors: list[dict[str, Any]],
-        policy_violations: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        policy_keys = {
-            (
-                str(record.get("tool_name") or ""),
-                json.dumps(record.get("args", {}), sort_keys=True),
-                str(record.get("observation") or ""),
-            )
-            for record in policy_violations
-        }
-        return [
-            record
-            for record in tool_semantic_errors
-            if (
-                str(record.get("tool_name") or ""),
-                json.dumps(record.get("args", {}), sort_keys=True),
-                str(record.get("observation") or ""),
-            )
-            not in policy_keys
-        ]
 
     def _evaluate_communicate_info(self, task: Task, final_answer: str) -> dict[str, Any]:
         expected = self._string_list(task.metadata.get("communicate_info"))
@@ -1674,6 +1659,7 @@ class TauBenchEnv(AgentEnv):
                 "actual_tool_name": actual.get("tool_name") if actual else None,
                 "actual_args": actual.get("args", {}) if actual else None,
                 "actual_ok": actual.get("ok") if actual else None,
+                "actual_observation": actual.get("observation") if actual else None,
             }
             if actual is None:
                 mismatches.append(
@@ -1956,19 +1942,105 @@ class TauBenchEnv(AgentEnv):
                 changes[key] = {"before": before_value, "after": after_value}
         return changes
 
-    def _tool_semantic_errors(self) -> list[dict[str, Any]]:
-        return [
-            {
+    def _classify_tool_observations(
+        self,
+        action_detail: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        expected_negative_observations: list[dict[str, Any]] = []
+        policy_violations: list[dict[str, Any]] = []
+        tool_semantic_errors: list[dict[str, Any]] = []
+        tool_observation_errors: list[dict[str, Any]] = []
+
+        expected_read_failures = self._expected_negative_observation_keys(action_detail)
+        for index, record in enumerate(self._tool_history):
+            if record.get("ok") is not False:
+                continue
+            error = {
+                "index": index,
                 "tool_name": record.get("tool_name"),
                 "args": record.get("args", {}),
                 "observation": record.get("observation", ""),
             }
-            for record in self._tool_history
-            if record.get("ok") is False
-        ]
+            error_key = self._tool_observation_key(index=index, record=error)
+            if error_key in expected_read_failures:
+                classified = dict(error)
+                classified["classification"] = "expected_negative_observation"
+                classified["reason"] = "matched_expected_read_action_returned_error"
+                expected_negative_observations.append(classified)
+                tool_observation_errors.append(classified)
+                continue
+            if self._is_policy_mutation_tool(str(record.get("tool_name") or "")):
+                classified = dict(error)
+                classified["classification"] = "policy_violation"
+                classified["violation_type"] = "retail_tool_precondition_failed"
+                policy_violations.append(classified)
+                tool_observation_errors.append(classified)
+                continue
+            classified = dict(error)
+            classified["classification"] = "tool_semantic_error"
+            tool_semantic_errors.append(classified)
+            tool_observation_errors.append(classified)
 
-    def _policy_violations(self, tool_semantic_errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        mutation_tools = {
+        return {
+            "tool_observation_errors": tool_observation_errors,
+            "expected_negative_observations": expected_negative_observations,
+            "policy_violations": policy_violations,
+            "tool_semantic_errors": tool_semantic_errors,
+        }
+
+    def _expected_negative_observation_keys(
+        self,
+        action_detail: dict[str, Any],
+    ) -> set[tuple[int, str, str, str]]:
+        keys: set[tuple[int, str, str, str]] = set()
+        alignment = action_detail.get("alignment") or []
+        if not isinstance(alignment, list):
+            return keys
+        for item in alignment:
+            if not isinstance(item, dict):
+                continue
+            if item.get("matched") is not True or item.get("actual_ok") is not False:
+                continue
+            tool_name = str(item.get("actual_tool_name") or "")
+            if not self._is_read_only_tool(tool_name):
+                continue
+            index = item.get("index")
+            if not isinstance(index, int):
+                continue
+            record = {
+                "tool_name": tool_name,
+                "args": item.get("actual_args", {}),
+                "observation": item.get("actual_observation", ""),
+            }
+            keys.add(self._tool_observation_key(index=index, record=record))
+        return keys
+
+    def _tool_observation_key(
+        self,
+        index: int,
+        record: dict[str, Any],
+    ) -> tuple[int, str, str, str]:
+        return (
+            index,
+            str(record.get("tool_name") or ""),
+            json.dumps(record.get("args", {}), sort_keys=True),
+            str(record.get("observation") or ""),
+        )
+
+    def _is_read_only_tool(self, tool_name: str) -> bool:
+        return tool_name in {
+            "find_user_id_by_name_zip",
+            "find_user_id_by_email",
+            "get_user_details",
+            "get_order_details",
+            "get_product_details",
+            "get_item_details",
+            "list_all_product_types",
+            "lookup_policy",
+        }
+
+    def _is_policy_mutation_tool(self, tool_name: str) -> bool:
+        return tool_name in {
             "modify_pending_order_address",
             "modify_pending_order_payment",
             "modify_pending_order_items",
@@ -1977,14 +2049,6 @@ class TauBenchEnv(AgentEnv):
             "exchange_delivered_order_items",
             "modify_user_address",
         }
-        violations = []
-        for error in tool_semantic_errors:
-            tool_name = str(error.get("tool_name") or "")
-            if tool_name in mutation_tools:
-                violation = dict(error)
-                violation["violation_type"] = "retail_tool_precondition_failed"
-                violations.append(violation)
-        return violations
 
 
 def _safe_arithmetic_eval(expression: str) -> int | float:

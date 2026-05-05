@@ -65,6 +65,12 @@ def aggregate_evaluation_details(results: list[AgentResult]) -> dict[str, object
         "policy_violation_count": sum(
             int(detail.get("policy_violation_count") or 0) for detail in details
         ),
+        "tool_observation_error_count": sum(
+            int(detail.get("tool_observation_error_count") or 0) for detail in details
+        ),
+        "expected_negative_observation_count": sum(
+            int(detail.get("expected_negative_observation_count") or 0) for detail in details
+        ),
         "tool_semantic_error_count": sum(
             int(detail.get("tool_semantic_error_count") or 0) for detail in details
         ),

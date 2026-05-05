@@ -1618,3 +1618,86 @@ grep '"event_type": "scripted_action"' runs/tau_retail_phase2_official_tau2_acti
 3. `tau_retail_phase2_official_tau2_action_replay.yaml` 对 task `2` 的 `6086499569` 给出官方一致解释：通过、unsupported known issue、expected negative observation，或明确 adapter/tool semantic bug。
 4. `tool_semantic_error_count` 不再混合 expected negative lookup 和真正工具语义错误。
 5. 若新增真实 LLM actor smoke，必须先在 no-memory 上输出可解释 failure taxonomy；不得把 raw-trace-rag、gate/replay/verification 结果提前作为 NT-MemEvo 方法收益。
+
+## 2026-05-05 第二阶段第四轮
+
+目标：对齐官方 tau2 数据、工具 observation 和 evaluator reward 口径，重点处理 expected action 中工具返回 `ok=false` 的场景，避免把官方 expected read lookup 的负向 observation 误归为 adapter/tool semantic bug。
+
+官方口径对照：
+
+1. 本地已存在官方数据仓库，无需本轮重新克隆：`data/external/tau-bench` commit 为 `59a200c6d575d595120f1cb70fea53cef0632f6b`，`data/external/tau2-bench` commit 为 `2be691669909439cf88dedc13decf94b7664d262`。
+2. 检查 `data/external/tau2-bench/src/tau2/evaluator/evaluator_action.py` 后确认：官方 action evaluator 只检查 expected tool call 是否出现在轨迹中以及参数是否匹配，不检查工具返回 `ok/error`。
+3. 检查 `data/external/tau2-bench/src/tau2/evaluator/evaluator_env.py` 后确认：官方 environment evaluator 会 replay golden actions；golden action 抛异常时记录 warning 并继续 DB hash 比较，因此 read-only gold action 查不到对象不应直接等价于 fatal reward failure。
+4. `6086499569` 仍只出现在 tau2 retail `tasks.json`、`task_issues`、legacy tau-bench task/trajectory 和工具文档示例中，没有出现在当前 tau2 retail `db.json` 的 products 中；第四轮将其解释为 matched expected read action 的 negative observation，而不是当前 adapter 的工具语义错误。
+
+已完成编码：
+
+1. 修改 `src/ntmemevo/envs/tau_bench.py`，新增 `_classify_tool_observations()`，将所有 `ok=false` 工具结果先归入 `tool_observation_errors`，再细分为 `expected_negative_observation`、`policy_violation` 和 `tool_semantic_error`。
+2. 对 matched expected read-only tool action 且 `actual_ok=false` 的情况，新增 `expected_negative_observations` 记录；当前覆盖 `find_user_id_by_name_zip`、`find_user_id_by_email`、`get_user_details`、`get_order_details`、`get_product_details`、`get_item_details`、`list_all_product_types` 和 `lookup_policy`。
+3. mutation/precondition 类工具失败继续归入 `policy_violations`，不再混入 `tool_semantic_errors`；当前覆盖 pending order mutation、cancel、return、exchange 和 `modify_user_address`。
+4. `tool_semantic_errors` 现在只保留非 policy、非 expected-negative 的剩余工具语义错误；`official_like` success 判定只把 unexpected policy violation、真正 tool semantic error 和 unsupported criterion 当作 fatal。
+5. `runs.jsonl.evaluation_details.expected_actual_action_alignment` 新增 `actual_observation`，使每个 expected-vs-actual action row 同时能看到 tool name、args、`actual_ok` 和 observation 文本。
+6. `runs.jsonl.evaluation_details` 新增 `tool_observation_error_count`、`tool_observation_errors`、`expected_negative_observation_count`、`expected_negative_observations`；保留 `policy_violation_count` 和新的严格 `tool_semantic_error_count`。
+7. 修改 `src/ntmemevo/evaluation/metrics.py`，聚合新增 `tool_observation_error_count` 与 `expected_negative_observation_count`。
+8. 更新 `README.md` 的 artifact/metrics 字段说明，明确 `tool_observation_error_count` 是所有 `ok=false`，`expected_negative_observation_count` 是 official expected read lookup 的负向观察，`tool_semantic_error_count` 只表示剩余非 policy、非 expected 的工具失败。
+9. 新增回归测试 `test_tau2_expected_read_tool_error_is_classified_as_negative_observation`：构造 expected `get_product_details(product_id=6086499569)` 的 action-replay 任务，验证 success 保持为 true、`expected_negative_observation_count=1`、`tool_semantic_error_count=0`。
+10. 新增回归测试 `test_tau2_unexpected_read_tool_error_remains_tool_semantic_error`：验证非 expected 的 read lookup failure 仍然失败，并归类为 `tool_semantic_error`。
+11. 更新 phase2 state fixture 测试：pending return 仍然是 `policy_violation`，但 `tool_semantic_error_count` 从旧口径的 `1` 调整为 `0`，对应新字段 `tool_observation_error_count=1`。
+
+本轮本地验证：
+
+1. `PYTHONPATH=src python -m pytest tests/test_tau_bench_adapter.py -q` 通过：`21 passed in 0.11s`。
+2. `PYTHONPATH=src python -m pytest -q` 通过：`36 passed in 0.13s`。
+3. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml` 通过：`success_rate=0.6666666666666666`、`expected_actions_matched_count=3`、`policy_violation_count=1`、`tool_observation_error_count=1`、`expected_negative_observation_count=0`、`tool_semantic_error_count=0`。
+4. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml` 通过：`success_rate=0.6666666666666666`、`memory_policy=raw_trace_rag`、`memory_size=3`、`tool_observation_error_count=1`、`tool_semantic_error_count=0`、`negative_transfer_rate=0.0`。
+5. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml` 通过并按预期失败：`success_rate=0.0`、`expected_actions_matched_count=0`、`expected_actions_failed_count=3`、`tool_observation_error_count=0`、`negative_transfer_rate=0.0`。
+6. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml` 通过并按预期失败：`success_rate=0.0`、`memory_policy=raw_trace_rag`、`memory_size=3`、`expected_actions_failed_count=3`、`tool_observation_error_count=0`、`negative_transfer_rate=0.0`。
+7. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay.yaml` 通过：`success_rate=1.0`、`expected_actions_matched_count=3`、`expected_actions_failed_count=0`、`communicate_info_passed_count=1`、`nl_assertion_passed_count=1`、`tool_observation_error_count=1`、`expected_negative_observation_count=1`、`tool_semantic_error_count=0`、`evaluator_error_types={}`。
+8. 抽查 `runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl`：task `2` 中 `get_product_details({"product_id":"6086499569"})` 仍返回 `Product 6086499569 was not found.`，但对应 alignment row 为 `matched=true`、`actual_ok=false`，并进入 `expected_negative_observations`，不再导致 run failure。
+
+结果分析：
+
+1. 第三轮 action-replay 剩余的唯一失败已按官方 action/env evaluator 口径解释为 expected read negative observation；官方 tau2 前 3 条 base task 的 action-replay 本地近似 evaluator 现在全部通过。
+2. 本轮没有改变 mock no-memory/raw-trace-rag 的 actor 能力边界：官方 mock 任务仍因 expected action sequence mismatch 失败，不能被解释为 memory 方法失败。
+3. 本轮修改了工具失败统计口径：`tool_observation_error_count` 是总观察错误计数；`policy_violation_count` 与 `expected_negative_observation_count` 是可解释子类；`tool_semantic_error_count` 只代表剩余真正工具语义错误。历史日志中 phase2 state 的 `tool_semantic_error_count=1` 在新口径下应读作 `tool_observation_error_count=1` 且 `policy_violation_count=1`。
+4. `official_like` 仍是本项目本地可解释 evaluator，不等价于官方 tau2 evaluator；但它与官方 action/env reward 组合的关键差异已进一步缩小。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+# 如果 data/external 下缺少官方仓库，先克隆：
+git clone https://github.com/sierra-research/tau-bench.git data/external/tau-bench
+git clone https://github.com/sierra-research/tau2-bench.git data/external/tau2-bench
+
+git -C data/external/tau-bench rev-parse HEAD
+git -C data/external/tau2-bench rev-parse HEAD
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay.yaml
+
+cat runs/tau_retail_phase2_official_tau2_action_replay_seed1/metrics.json
+grep '6086499569' runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl
+grep '"expected_negative_observations"' runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl
+grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl
+```
+
+实验日志填写建议：
+
+1. 用户正式复验后再更新 `docs/experiment_log.md`，建议新增 `tau_retail_phase2_official_tau2_action_replay_seed1_round4_observation_taxonomy` 或在原 action-replay 条目下追加第四轮复验小节。
+2. 重点记录 action-replay 指标变化：第三轮 `success_rate=0.6666666666666666`、`tool_semantic_error_count=1`；第四轮新口径下 `success_rate=1.0`、`tool_observation_error_count=1`、`expected_negative_observation_count=1`、`tool_semantic_error_count=0`。
+3. 重点记录 state fixture 指标口径变化：pending return 仍是 policy violation，但不再算作 `tool_semantic_error`；应记录为 `tool_observation_error_count=1`、`policy_violation_count=1`、`tool_semantic_error_count=0`。
+4. 本轮仍只用于 official adapter/evaluator 对齐，不用于报告 NT-MemEvo 方法收益。
+
+下一步建议：
+
+1. 在官方 action-replay 前 3 条全部通过后，可以进入真实 LLM actor `max_tasks=1/3` no-memory smoke，但必须先保留 failure taxonomy，不做 memory 收益结论。
+2. 继续对齐 official reward basis：区分 DB、ACTION、COMMUNICATE、NL_ASSERTION 是否进入最终 reward，而不是只作为 detail 记录。
+3. 对官方更多 task 的 read negative observation、mutation policy failure 和 unsupported criterion 做批量扫描，形成 official compatibility report。
+4. 真实 no-memory actor 失败类型稳定后，再迁移 `raw_trace_rag` 对照；`nt_memevo_gate`、support verification 和 scope refinement 仍暂缓。
