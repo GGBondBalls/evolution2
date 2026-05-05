@@ -388,6 +388,7 @@ class OpenAICompatibleChatClient(LLMClient):
         extract_json_object: bool = False,
         strip_thinking: bool = False,
         extra_body: dict[str, Any] | None = None,
+        context_overflow_margin_tokens: int = 64,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -400,6 +401,7 @@ class OpenAICompatibleChatClient(LLMClient):
         self.extract_json_object = extract_json_object
         self.strip_thinking = strip_thinking
         self.extra_body = dict(extra_body or {})
+        self.context_overflow_margin_tokens = max(0, context_overflow_margin_tokens)
         if healthcheck:
             self._healthcheck()
 
@@ -505,6 +507,15 @@ class OpenAICompatibleChatClient(LLMClient):
                 last_error = RuntimeError(
                     f"{self.provider_name} HTTP {exc.code} from {url}: {error_body}"
                 )
+                adjusted_payload = _reduce_max_tokens_for_context_overflow(
+                    payload=payload,
+                    error_body=error_body,
+                    margin_tokens=self.context_overflow_margin_tokens,
+                )
+                if adjusted_payload is not None and attempt < attempts:
+                    payload = adjusted_payload
+                    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    continue
             except (urllib.error.URLError, TimeoutError) as exc:
                 last_error = exc
             else:
@@ -611,6 +622,9 @@ def create_llm_client(config: dict[str, Any]) -> LLMClient:
             extract_json_object=bool(config.get("extract_json_object", True)),
             strip_thinking=bool(config.get("strip_thinking", True)),
             extra_body=extra_body,
+            context_overflow_margin_tokens=int(
+                config.get("context_overflow_margin_tokens", 64)
+            ),
         )
     raise ValueError(f"Unsupported LLM provider: {provider}")
 
@@ -625,3 +639,38 @@ def _resolve_secret_config_value(
     if isinstance(value, str) and value.startswith("env:"):
         return os.getenv(value.removeprefix("env:"), default)
     return str(value)
+
+
+def _reduce_max_tokens_for_context_overflow(
+    payload: dict[str, Any] | None,
+    error_body: str,
+    margin_tokens: int = 64,
+) -> dict[str, Any] | None:
+    if payload is None or "max_tokens" not in payload:
+        return None
+    try:
+        current_max_tokens = int(payload.get("max_tokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    if current_max_tokens <= 1:
+        return None
+
+    match = re.search(
+        r"maximum context length is\s+(\d+)\s+tokens.*?"
+        r"requested\s+(\d+)\s+output tokens.*?"
+        r"prompt contains at least\s+(\d+)\s+input tokens",
+        error_body,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+
+    context_window = int(match.group(1))
+    prompt_tokens = int(match.group(3))
+    adjusted_max_tokens = context_window - prompt_tokens - margin_tokens
+    if adjusted_max_tokens < 1 or adjusted_max_tokens >= current_max_tokens:
+        return None
+
+    adjusted = dict(payload)
+    adjusted["max_tokens"] = adjusted_max_tokens
+    return adjusted

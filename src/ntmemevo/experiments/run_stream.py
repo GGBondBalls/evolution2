@@ -57,6 +57,9 @@ def run(config_path: str) -> dict[str, Any]:
             max_steps=max_steps,
             memory_top_k=int(config.agent.get("memory_top_k", 0)),
             log_raw_model_io=bool(config.logging.get("save_raw_model_io", False)),
+            stop_after_expected_actions=bool(
+                config.agent.get("stop_after_expected_actions", False)
+            ),
         )
         run_agent_label = "react_tool_agent"
     else:

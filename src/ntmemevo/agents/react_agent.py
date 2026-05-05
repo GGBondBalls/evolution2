@@ -19,12 +19,14 @@ class ReActToolAgent(Agent):
         max_steps: int,
         memory_top_k: int = 0,
         log_raw_model_io: bool = False,
+        stop_after_expected_actions: bool = False,
     ) -> None:
         self.llm = llm
         self.model_config = model_config
         self.max_steps = max_steps
         self.memory_top_k = memory_top_k
         self.log_raw_model_io = log_raw_model_io
+        self.stop_after_expected_actions = stop_after_expected_actions
 
     def run(
         self,
@@ -152,6 +154,23 @@ class ReActToolAgent(Agent):
                     "ok": result.ok,
                 },
             )
+            expected_actions_completed = getattr(env, "expected_actions_completed", None)
+            if (
+                self.stop_after_expected_actions
+                and callable(expected_actions_completed)
+                and expected_actions_completed(task)
+            ):
+                final_answer = result.observation
+                trace_logger.log_event(
+                    task_id=task.task_id,
+                    step=step,
+                    event_type="expected_actions_complete",
+                    payload={
+                        "tool_calls": tool_calls,
+                        "final_answer": final_answer,
+                    },
+                )
+                break
         else:
             error_type = "max_steps_exceeded"
             final_answer = observations[-1] if observations else "No final answer."

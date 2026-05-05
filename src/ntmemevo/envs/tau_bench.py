@@ -159,6 +159,12 @@ class TauBenchEnv(AgentEnv):
         )
         return result
 
+    def expected_actions_completed(self, task: Task) -> bool:
+        expected_actions = task.metadata.get("expected_actions") or []
+        if not expected_actions or len(self._tool_history) != len(expected_actions):
+            return False
+        return bool(self._compare_actions(expected_actions).get("passed"))
+
     def _cancel_pending_order(self, args: dict[str, Any]) -> ToolResult:
         order_id = str(args.get("order_id") or "")
         result = self._set_order_status(

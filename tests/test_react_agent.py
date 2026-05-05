@@ -32,6 +32,7 @@ class _SequenceLLM(LLMClient):
 class _OneToolEnv(AgentEnv):
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.complete_after_calls: int | None = None
 
     def load_tasks(self, max_tasks: int | None = None) -> list[Task]:
         return []
@@ -51,6 +52,10 @@ class _OneToolEnv(AgentEnv):
     def evaluate(self, task: Task, final_answer: str) -> tuple[bool, float, str | None]:
         success = "delivered" in final_answer.lower()
         return success, 1.0 if success else 0.0, None if success else "expected_answer_mismatch"
+
+    def expected_actions_completed(self, task: Task) -> bool:
+        del task
+        return self.complete_after_calls is not None and len(self.calls) >= self.complete_after_calls
 
 
 class _CapturingTraceLogger:
@@ -176,3 +181,37 @@ def test_react_agent_logs_unrepairable_missing_action_raw_response() -> None:
     assert decisions[0]["repair_reason"] == "missing_action_without_tool_fields"
     assert decisions[0]["raw_response"] == raw_response
     assert decisions[0]["parsed_decision"] == {"thought": "I should call get_order_status next."}
+
+
+def test_react_agent_can_stop_after_expected_actions_complete() -> None:
+    llm = _SequenceLLM(
+        [
+            (
+                '{"thought":"Need order status.","action":"tool",'
+                '"tool_name":"get_order_status","args":{"order_id":"ORD-1001"}}'
+            ),
+            (
+                '{"thought":"This should not be called.","action":"tool",'
+                '"tool_name":"lookup_policy","args":{"policy_name":"exchange"}}'
+            ),
+        ]
+    )
+    env = _OneToolEnv()
+    env.complete_after_calls = 1
+    trace_logger = _CapturingTraceLogger()
+    result = ReActToolAgent(
+        llm=llm,
+        model_config={},
+        max_steps=4,
+        stop_after_expected_actions=True,
+    ).run(task=_task(), env=env, trace_logger=trace_logger)
+
+    assert result.success is True
+    assert result.num_steps == 2
+    assert result.tool_calls == 1
+    assert env.calls == [("get_order_status", {"order_id": "ORD-1001"})]
+    assert len(llm.responses) == 1
+    assert any(
+        event["event_type"] == "expected_actions_complete"
+        for event in trace_logger.events
+    )

@@ -2664,6 +2664,10 @@ grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_real_actor
 
 关键参数：`benchmark.task_split=base`，`benchmark.max_tasks=1`，`benchmark.evaluation=official_like`，`agent.type=react_tool_agent`，`agent.max_steps=16`，`models.actor.provider=vllm`，`models.actor.model=qwen3.5-9b`，`models.actor.base_url_env=VLLM_BASE_URL`，`temperature=0.0`，`logging.save_raw_model_io=true`，`memory_policy=none`。
 
+第六轮 hotfix 后关键参数补充：`models.actor.max_tokens=768`，`models.actor.context_overflow_margin_tokens=128`。若 vLLM 返回 4096 context overflow，client 会按服务端报出的 prompt token 数降低 `max_tokens` 并重试。
+
+第二次 hotfix 后关键参数补充：`agent.stop_after_expected_actions=true`，`models.actor.max_tokens=512`，`models.actor.context_overflow_margin_tokens=256`。该配置用于 real-actor official-like smoke：一旦当前 tool history 完整匹配官方 expected actions，agent 写入 `expected_actions_complete` trace event 并停止，避免完成目标后继续循环破坏状态。
+
 ### 输出目录
 
 `runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/`
@@ -2698,6 +2702,7 @@ grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_real_actor
 3. 若仍出现 `unsupported_action`，记录最后一条 `model_decision` 的 `repair_status`、`repair_reason`、`raw_response` 和 `parsed_decision`。
 4. 若 task `0` 越过第五轮第二步，记录新的工具链深度：是否调用 `get_order_details`，是否继续调用 `get_product_details`，是否最终调用 `exchange_delivered_order_items`。
 5. 若失败类型变化，记录 `runs.jsonl.evaluation_details` 中的 action/state/communicate/nl/tool taxonomy。
+6. 第二次 hotfix 后额外检查 `grep '"event_type": "expected_actions_complete"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl`；若出现该事件，task `0` 不应再继续调用第二次 `exchange_delivered_order_items` 或重复 `lookup_policy(exchange)`。
 
 ### 现象与问题
 
@@ -2706,6 +2711,8 @@ grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_real_actor
 1. 如果 repair 生效并推进到更深工具链，本轮通过输出协议加固验收，下一步可分析新的失败 taxonomy。
 2. 如果仍失败但 raw response、parsed decision 和不可修复原因可见，本轮也满足诊断验收，下一步应根据原始输出调整 prompt 或 parser。
 3. 如果 trace 中仍缺 raw response 或 repair 字段，说明第六轮日志验收未通过，应先修 trace 再扩样本。
+4. 如果再次出现 `maximum context length is 4096 tokens`，记录当时 vLLM 报出的 prompt tokens、requested output tokens 和配置中的 `max_tokens`；正常情况下 hotfix 后首轮不应再因 `1536` 输出预算越界。
+5. 如果 real actor 已完成 5 个 expected actions 但仍 `max_steps_exceeded`，说明 `stop_after_expected_actions` 未生效，应先检查配置是否已更新并重新安装 editable 包。
 
 ### 下一步
 

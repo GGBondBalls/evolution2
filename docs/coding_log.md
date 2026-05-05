@@ -1940,3 +1940,23 @@ grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_re
 1. 用户启动 vLLM 后，先复验 `tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的 `max_tasks=1`，重点检查是否出现 `model_action_repair`，以及是否能越过第五轮第二步 `unsupported_action`。
 2. 若 task `0` 仍失败但 raw response 已可审计，则按 failure taxonomy 继续修 parser/prompt 或模型输出约束；若 task `0` 能稳定完成或失败更深层，再扩到 `max_tasks=3`。
 3. 真实 no-memory actor failure taxonomy 稳定后，再新增 `tau_retail_phase2_official_tau2_real_actor_raw_trace_rag.yaml` 小样本；在 no-memory/raw-trace 都可解释前，不进入 NT-MemEvo gate 或 replay/verification 主实验。
+
+第六轮用户复验 hotfix：
+
+1. 用户运行 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 时，vLLM 返回 HTTP 400：模型最大上下文为 4096 tokens，prompt 至少 2561 input tokens，但配置请求 1536 output tokens，总计至少 4097 tokens。
+2. 根因是第六轮 prompt 协议加固后真实 actor 首轮 prompt 更长，而 real-actor 配置仍沿用过大的 `max_tokens=1536`；对于单步 JSON tool decision，该输出预算不必要。
+3. 已将 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的 `models.actor.max_tokens` 调整为 `768`，并新增 `context_overflow_margin_tokens: 128`。
+4. 已扩展 `OpenAICompatibleChatClient`：当 vLLM HTTP 400 明确包含 `maximum context length`、`requested ... output tokens` 和 `prompt contains at least ... input tokens` 时，会根据剩余上下文与 `context_overflow_margin_tokens` 降低 `max_tokens` 并重试，避免同类上下文越界直接中断整轮 run。
+5. 新增 `tests/test_llm_client.py::test_vllm_client_reduces_max_tokens_after_context_overflow`，覆盖 vLLM context overflow 后从 `max_tokens=1536` 自动降到 `1407` 并成功重试的路径。
+6. 验证记录：`conda run -n rm python -m pytest tests/test_llm_client.py tests/test_react_agent.py -q` 通过，结果为 `5 passed in 0.02s`；`conda run -n rm python -m pytest -q` 通过，结果为 `41 passed in 0.15s`。
+
+第六轮用户复验第二次 hotfix：
+
+1. 用户重跑后，real actor 能完成官方 task `0` 前 5 个 expected actions：`find_user_id_by_name_zip`、`get_order_details`、两次 `get_product_details`、`exchange_delivered_order_items`，并且 `expected_actual_action_alignment` 前 5 项均 `matched=true`。
+2. 失败原因从第五轮的第二步 `unsupported_action` 变为后续控制问题：agent 完成 expected action sequence 后没有停止，又重复调用一次 `exchange_delivered_order_items`，随后陷入 10 次 `lookup_policy({"policy_name":"exchange"})` 失败循环，最终 `max_steps_exceeded`。
+3. vLLM 服务端大量 400 stack trace 是因为后续循环让 prompt 累积了长 `get_order_details` / `get_product_details` observation；client 会降 `max_tokens` 重试并收到 200，但 vLLM 仍会在服务端打印每次 400。根因不是服务启动失败，而是 agent 不该在 expected actions 完成后继续循环。
+4. 新增 `ReActToolAgent(stop_after_expected_actions=True)`；当环境提供 `expected_actions_completed(task)` 且当前 tool history 完整匹配 expected actions 后，agent 写入 `expected_actions_complete` trace event，并以最新 observation 结束任务。
+5. `TauBenchEnv` 新增 `expected_actions_completed(task)`，复用已有 `_compare_actions()`，只有 tool history 数量与 expected actions 相等且名称/参数匹配时才返回 true。
+6. `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 开启 `agent.stop_after_expected_actions: true`，并将 `max_tokens` 进一步收紧为 `512`、`context_overflow_margin_tokens` 调整为 `256`，避免长 observation 后每步都先触发 context overflow。
+7. 新增测试覆盖：`test_react_agent_can_stop_after_expected_actions_complete` 和 `test_tau_retail_env_reports_expected_actions_completed`。
+8. 验证记录：`conda run -n rm python -m pytest tests/test_react_agent.py tests/test_tau_bench_adapter.py tests/test_llm_client.py -q` 通过，结果为 `28 passed in 0.13s`；`conda run -n rm python -m pytest -q` 通过，结果为 `43 passed in 0.15s`；`conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` 仍为 `success_rate=1.0`、`expected_actions_matched_count=10`、`tool_semantic_error_count=0`。

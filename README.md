@@ -378,7 +378,10 @@ For local real-actor runs, `models.actor.provider=vllm` expects an
 OpenAI-compatible endpoint. Useful actor fields are `base_url_env`, `base_url`,
 `api_key` or `api_key_env`, `healthcheck`, `timeout_seconds`, `request_retries`,
 `strip_thinking`, `extract_json_object`, `disable_response_format`, and
-`extra_body`.
+`extra_body`. For local 4096-token context windows, keep real-actor
+`max_tokens` conservative for one-step JSON decisions; the client also supports
+`context_overflow_margin_tokens` to lower `max_tokens` and retry when vLLM
+returns a context-overflow 400 response.
 For structured candidate-memory runs it additionally reports utility update counts and lifecycle counts:
 `utility_update_count`, `utility_helpful_count`, `utility_harmful_count`, `candidate_memory_count`, `active_memory_count`, and `quarantined_memory_count`.
 Replay-enabled runs additionally report `replay_result_count`, `replay_leave_one_count`, `replay_helpful_count`, `replay_harmful_count`, `replay_neutral_count`, `replay_utility_update_count`, `online_proxy_utility_update_count`, and `utility_credit_sources`.

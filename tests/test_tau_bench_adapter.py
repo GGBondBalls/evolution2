@@ -615,6 +615,60 @@ logging:
     assert any(record["event_type"] == "scripted_action" for record in trace_records)
 
 
+def test_tau_retail_env_reports_expected_actions_completed(tmp_path: Path) -> None:
+    tasks_path = tmp_path / "official_expected_complete_tasks.json"
+    split_path = tmp_path / "official_expected_complete_splits.json"
+    tasks_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "0",
+                    "user_scenario": {
+                        "instructions": {
+                            "reason_for_call": "Look up the details for order #READ1001.",
+                            "known_info": "You are Mira Chen.",
+                        }
+                    },
+                    "evaluation_criteria": {
+                        "actions": [
+                            {
+                                "action_id": "0_0",
+                                "name": "get_order_details",
+                                "arguments": {"order_id": "#READ1001"},
+                            }
+                        ],
+                        "reward_basis": ["ACTION"],
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    split_path.write_text(json.dumps({"base": ["0"]}), encoding="utf-8")
+    env = TauBenchEnv(
+        {
+            "domain": "retail",
+            "split_file": str(tasks_path),
+            "task_split_file": str(split_path),
+            "task_split": "base",
+            "data_dir": "data/tau_bench/retail_phase2_state",
+            "evaluation": "official_like",
+            "compare_action_args": True,
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+    task = env.load_tasks(max_tasks=1)[0]
+    env.start_task(task)
+
+    assert env.expected_actions_completed(task) is False
+
+    result = env.call_tool("get_order_details", {"order_id": "#READ1001"})
+
+    assert result.ok
+    assert env.expected_actions_completed(task) is True
+
+
 def test_tau2_expected_read_tool_error_is_classified_as_negative_observation(
     tmp_path: Path,
 ) -> None:

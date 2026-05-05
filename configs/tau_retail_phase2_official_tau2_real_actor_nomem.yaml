@@ -20,6 +20,7 @@ agent:
   type: react_tool_agent
   max_steps: 16
   memory_top_k: 0
+  stop_after_expected_actions: true
 
 models:
   actor:
@@ -29,7 +30,8 @@ models:
     base_url: http://127.0.0.1:8000/v1
     api_key: EMPTY
     temperature: 0.0
-    max_tokens: 1536
+    max_tokens: 512
+    context_overflow_margin_tokens: 256
     timeout_seconds: 180
     request_retries: 2
     retry_sleep_seconds: 2
