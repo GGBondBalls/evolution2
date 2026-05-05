@@ -2456,3 +2456,132 @@ action-replay 第四轮 `metrics.json` 关键字段：
 3. 在实验日志中单独列出 ACTION、DB/state、COMMUNICATE、NL_ASSERTION、unsupported criterion 和 tool observation taxonomy 的通过/失败数量，说明哪些字段进入本地 `official_like.success`。
 4. 真实 actor no-memory 结果稳定前，不迁移 `raw_trace_rag` 以外的 memory 方法；`nt_memevo_gate`、support verification 和 scope refinement 继续暂缓。
 5. 第五轮仍只用于 official adapter/evaluator/actor 对齐，不用于报告 NT-MemEvo 方法收益。
+
+## tau_retail_phase2_official_tau2_real_actor_nomem_seed1 第五轮本地 Qwen/vLLM 真实 actor 待填
+
+### 实验名称
+
+`tau_retail_phase2_official_tau2_real_actor_nomem_seed1`
+
+### 日期与环境
+
+待填写。建议记录 Linux 机器标识、conda 环境 `(rm)`、Python 版本、vLLM 版本、CUDA_VISIBLE_DEVICES、GPU 型号/显存、`PORT`、`MODEL_PATH=/home/fyk/models/Qwen/Qwen3.5-9B`、`SERVED_MODEL_NAME=qwen3.5-9b`、`MAX_MODEL_LEN` 和 `GPU_MEMORY_UTILIZATION`。
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev,vllm]"
+
+# 终端 1：启动本地模型服务
+CUDA_VISIBLE_DEVICES=0 bash scripts/start_vllm_qwen35_9b.sh
+
+# 终端 2：健康检查与实验
+curl http://127.0.0.1:8000/v1/models
+# 如果服务使用非默认端口，例如 PORT=8001：
+# export VLLM_BASE_URL=http://127.0.0.1:8001/v1
+python -m pytest
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml
+
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/metrics.json
+tail -n 1 runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/runs.jsonl
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl || true
+grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl
+```
+
+### 配置文件
+
+`configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`
+
+关键参数待填写：`benchmark.task_split=base`，`benchmark.max_tasks=1`，`benchmark.evaluation=official_like`，`agent.type=react_tool_agent`，`agent.max_steps=16`，`models.actor.provider=vllm`，`models.actor.model=qwen3.5-9b`，`models.actor.base_url_env=VLLM_BASE_URL`，`models.actor.base_url=http://127.0.0.1:8000/v1`，`temperature=0.0`，`memory_policy=none`。
+
+### 输出目录
+
+`runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/`
+
+### 结果
+
+待填写。建议至少记录：
+
+```json
+{
+  "num_tasks": null,
+  "success_rate": null,
+  "avg_reward": null,
+  "avg_steps": null,
+  "avg_prompt_tokens": null,
+  "avg_completion_tokens": null,
+  "avg_tool_calls": null,
+  "expected_actions_matched_count": null,
+  "expected_actions_failed_count": null,
+  "communicate_info_passed_count": null,
+  "nl_assertion_passed_count": null,
+  "tool_observation_error_count": null,
+  "expected_negative_observation_count": null,
+  "policy_violation_count": null,
+  "tool_semantic_error_count": null,
+  "unsupported_official_criteria_count": null,
+  "evaluator_error_types": null,
+  "memory_policy": "none",
+  "negative_transfer_rate": 0.0
+}
+```
+
+### 抽查结果
+
+待填写。建议逐条记录：
+
+1. 是否出现 `model_parse_error`，若出现，保存原始响应前 500 字符并判断是否是 Qwen thinking、Markdown fence 或非 JSON 文本导致。
+2. 每条任务的 `error_type`、`expected_actions_matched`、`actual_action_count` 和 `action_mismatches`。
+3. `evaluation_details` 中 ACTION、DB/state、COMMUNICATE、NL_ASSERTION、unsupported criterion 和 tool observation taxonomy 的通过/失败。
+4. 若工具调用失败，区分 `expected_negative_observation`、`policy_violation` 和真正 `tool_semantic_error`。
+
+### 现象与问题
+
+待填写。当前预期：本实验只验证本地 Qwen/vLLM actor 的 no-memory 可解释失败类型，不报告 NT-MemEvo 方法收益。
+
+### 下一步
+
+待填写。若 `max_tasks=1` 失败可解释，下一步可把配置中的 `benchmark.max_tasks` 改为 `3` 继续复验；若真实 actor failure taxonomy 稳定，再新增 raw-trace-rag 真实 actor 小样本配置。
+
+## tau_retail_phase2_official_tau2_action_replay_scan10_seed1 第五轮 compatibility scan 待填
+
+### 实验名称
+
+`tau_retail_phase2_official_tau2_action_replay_scan10_seed1`
+
+### 日期与环境
+
+待填写。建议记录官方 repo commit、conda 环境、Python/pytest 版本。
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+git -C data/external/tau-bench rev-parse HEAD
+git -C data/external/tau2-bench rev-parse HEAD
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/metrics.json
+grep '"expected_negative_observations"' runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/runs.jsonl
+grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/runs.jsonl
+```
+
+### 配置文件
+
+`configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml`
+
+关键参数：`benchmark.task_split=base`，`benchmark.max_tasks=10`，`agent.type=action_replay_agent`，`evaluation=official_like`，`memory_policy=none`。
+
+### 输出目录
+
+`runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/`
+
+### 结果
+
+待填写。编码阶段本地验证参考值为：`37 passed`，scan10 `success_rate=1.0`、`expected_actions_matched_count=10`、`tool_observation_error_count=3`、`expected_negative_observation_count=3`、`tool_semantic_error_count=0`、`communicate_info_passed_count=3`、`nl_assertion_passed_count=3`、`unsupported_official_criteria_count=0`。
+
+### 现象与问题
+
+待填写。该实验是 action-replay oracle 兼容性扫描，用于在真实 actor/vLLM 服务不可用时继续检查官方数据、工具 observation taxonomy 和 evaluator 口径；不代表真实 LLM actor 能力，也不代表 memory 方法收益。

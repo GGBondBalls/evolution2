@@ -23,6 +23,7 @@ Current scope:
 17. Run phase-two tau-retail state/evaluator alignment checks with task-level DB reset, mutation-tool semantics, state-diff details, action-argument normalization, and policy/precondition violation logging.
 18. Run phase-two probes directly against a cloned official `sierra-research/tau2-bench` retail checkout, including official nested task loading, split filtering, and raw-trace memory logging.
 19. Run a phase-two official tau2 action-replay oracle that executes `evaluation_criteria.actions` step by step and separates actor mismatch from tool/evaluator semantic gaps.
+20. Run a local-Qwen real actor through a vLLM OpenAI-compatible endpoint without requiring the OpenAI Python SDK in the experiment process.
 
 ## Environment
 
@@ -30,6 +31,32 @@ Current scope:
 conda activate rm
 pip install -e ".[dev]"
 ```
+
+Optional local vLLM actor service for Qwen:
+
+```bash
+conda activate rm
+pip install -e ".[dev,vllm]"
+
+# Start in a dedicated terminal. Pin CUDA_VISIBLE_DEVICES to avoid colliding
+# with other experiments on the same server.
+CUDA_VISIBLE_DEVICES=0 bash scripts/start_vllm_qwen35_9b.sh
+
+# Health check from another terminal.
+curl http://127.0.0.1:8000/v1/models
+```
+
+The default script serves `/home/fyk/models/Qwen/Qwen3.5-9B` as
+`qwen3.5-9b` on `http://127.0.0.1:8000/v1`. Override scheduling parameters
+with environment variables:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PORT=8001 GPU_MEMORY_UTILIZATION=0.80 MAX_MODEL_LEN=8192 \
+  bash scripts/start_vllm_qwen35_9b.sh
+```
+
+The experiment client uses the OpenAI-compatible HTTP API directly via the
+standard library. It does not require `openai` or an `OPENAI_API_KEY`.
 
 ## Smoke Test
 
@@ -135,6 +162,10 @@ git clone https://github.com/sierra-research/tau2-bench.git data/external/tau2-b
 python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml
 python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml
 python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+
+# Requires the local vLLM service above.
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml
 ```
 
 `data/external/` is ignored by git. The old `tau-bench` repository is kept for
@@ -336,6 +367,11 @@ tool_semantic_errors
 `metrics.json` also includes `with_memory_fail_no_memory_success`, `negative_transfer_rate`, `harmful_memory_ids`, and gate acceptance/rejection counts.
 Tau-retail evaluator-alignment runs additionally report `evaluation_modes`, `state_diff_evaluated_count`, `state_diff_passed_count`, `state_diff_failed_count`, `expected_actions_evaluated_count`, `expected_actions_matched_count`, `expected_actions_failed_count`, `communicate_info_evaluated_count`, `communicate_info_passed_count`, `nl_assertion_evaluated_count`, `nl_assertion_passed_count`, `unsupported_official_criteria_count`, `policy_violation_count`, `tool_observation_error_count`, `expected_negative_observation_count`, `tool_semantic_error_count`, and `evaluator_error_types`.
 `tool_observation_error_count` counts every `ok=false` tool result, while `expected_negative_observation_count` separates matched expected read lookups that return a negative observation under official tau2 action-replay. `tool_semantic_error_count` is reserved for remaining non-policy, non-expected tool failures.
+For local real-actor runs, `models.actor.provider=vllm` expects an
+OpenAI-compatible endpoint. Useful actor fields are `base_url_env`, `base_url`,
+`api_key` or `api_key_env`, `healthcheck`, `timeout_seconds`, `request_retries`,
+`strip_thinking`, `extract_json_object`, `disable_response_format`, and
+`extra_body`.
 For structured candidate-memory runs it additionally reports utility update counts and lifecycle counts:
 `utility_update_count`, `utility_helpful_count`, `utility_harmful_count`, `candidate_memory_count`, `active_memory_count`, and `quarantined_memory_count`.
 Replay-enabled runs additionally report `replay_result_count`, `replay_leave_one_count`, `replay_helpful_count`, `replay_harmful_count`, `replay_neutral_count`, `replay_utility_update_count`, `online_proxy_utility_update_count`, and `utility_credit_sources`.
@@ -350,21 +386,18 @@ pytest
 
 ## Next Milestone
 
-Phase two round three adds the official tau2 action-replay oracle. The next
-round should keep adapter/evaluator alignment separate from memory-method
-claims:
+Phase two round five introduces the local Qwen/vLLM real-actor smoke while
+keeping adapter/evaluator alignment separate from memory-method claims:
 
-1. Resolve the official task `2` semantic gap where
-   `get_product_details(product_id=6086499569)` is listed in expected actions
-   but the current official DB snapshot does not contain that product id.
-2. Compare action-replay artifacts against the official tau2 evaluator for
-   `communicate_info`, `nl_assertions`, DB mutations, and tool preconditions.
-3. Add only the retail tool semantics exposed by official failures, especially
-   payment/refund/exchange state details.
-4. After the action-replay/oracle path has explainable rewards, introduce a
-   real LLM actor smoke on `max_tasks=1/3`; keep `nt_memevo_gate`, support
-   verification, and scope refinement out of the main path until no-memory
-   reward is explainable.
-5. Keep the first-stage regression matrix green, especially tiny refinement,
+1. Start with `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`
+   at `max_tasks=1`, then raise to `max_tasks=3` only after failures are
+   explainable through action/state/communicate/nl/tool taxonomy.
+2. Use `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` as
+   the fallback compatibility scan when the vLLM service is unavailable or GPU
+   scheduling is blocked.
+3. Keep `nt_memevo_gate`, support verification, and scope refinement out of the
+   official tau2 main path until real no-memory and raw-trace actor failures are
+   stable and explainable.
+4. Keep the first-stage regression matrix green, especially tiny refinement,
    unsafe polluted negative transfer, phase-two state fixture, and official
    tau2 no-memory/raw-trace/action-replay probes.

@@ -1741,3 +1741,85 @@ grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_
 3. 真实 actor no-memory smoke 至少完成 `max_tasks=1`；若运行到 `max_tasks=3`，每条失败必须在 `runs.jsonl.evaluation_details` 中给出 action/state/communicate/nl/tool taxonomy。
 4. 若真实 actor 不可用，action-replay compatibility scan 至少覆盖官方 base 前 10 条，并产出可写入 `docs/experiment_log.md` 的 compatibility summary。
 5. `docs/experiment_log.md` 新增第五轮实验记录，明确当前仍处于 official adapter/evaluator/actor 对齐阶段，不进入 memory 方法收益结论。
+
+## 2026-05-05 第二阶段第五轮
+
+目标：在第四轮 action-replay oracle 与 observation taxonomy 稳定后，进入官方 tau2 真实 actor no-memory 小批量 smoke 的准备工作；同时按用户要求把真实 actor 调用策略从 OpenAI API 优先迁移为本地 `/home/fyk/models/Qwen/Qwen3.5-9B` + vLLM OpenAI-compatible 服务，并保留 action-replay scan10 作为真实 actor 暂不可用时的兼容性报告路径。
+
+环境检查：
+
+1. 当前 `conda run -n rm python` 为 Python 3.12.13。
+2. 当前 `rm` 环境未安装 `vllm` 和 `openai` 包；因此本轮没有尝试直接启动真实 vLLM 服务。
+3. 本地模型目录 `/home/fyk/models/Qwen/Qwen3.5-9B` 存在，大小约 19G，包含 tokenizer、chat template、config 和 4 个 safetensors 分片。
+4. 官方数据仓库仍已在 `data/external/` 下准备好，本轮无需重新克隆真实数据。
+
+已完成编码：
+
+1. 修改 `src/ntmemevo/llm/client.py`，新增 `OpenAICompatibleChatClient`，使用 Python 标准库直接请求 OpenAI-compatible `/v1/chat/completions`，不依赖 OpenAI SDK。
+2. `create_llm_client()` 新增 `provider=vllm` / `provider=local_vllm` / `provider=openai_compatible`，支持 `base_url_env`、`base_url`、`api_key`、`api_key_env`、`timeout_seconds`、`request_retries`、`retry_sleep_seconds`、`healthcheck`、`disable_response_format`、`strip_thinking`、`extract_json_object` 和 `extra_body`。
+3. vLLM client 默认访问 `/v1/models` 做健康检查；如果服务未启动，会给出明确提示：先运行 `bash scripts/start_vllm_qwen35_9b.sh`，或在干跑配置时设置 `healthcheck=false`。
+4. 针对本地 Qwen 可能输出 `<think>...</think>`、Markdown code fence 或 JSON 外文本的情况，client 支持在 `response_format={"type":"json_object"}` 时抽取首个 JSON object，降低真实 actor 因格式噪声直接 `invalid_json_response` 的概率。
+5. 新增 `scripts/start_vllm_qwen35_9b.sh`，默认以 `served_model_name=qwen3.5-9b` 启动 `/home/fyk/models/Qwen/Qwen3.5-9B`，监听 `127.0.0.1:8000`，并支持 `CUDA_VISIBLE_DEVICES`、`PORT`、`GPU_MEMORY_UTILIZATION`、`MAX_MODEL_LEN`、`DTYPE` 等调度参数。
+6. `pyproject.toml` 新增可选 extra `vllm`，用于目标服务器安装 `pip install -e ".[dev,vllm]"`；实验 client 本身仍不依赖该包，只有服务端启动脚本需要 vLLM。
+7. 新增 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`，默认运行官方 tau2 retail base split 前 1 条任务，`agent.type=react_tool_agent`，`models.actor.provider=vllm`，`model=qwen3.5-9b`，`base_url_env=VLLM_BASE_URL`，输出到 `runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/`。
+8. 新增 `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml`，默认使用 action-replay oracle 扫描官方 base 前 10 条任务，作为真实 actor/GPU 调度不可用时的 reward-basis / observation taxonomy 兼容性报告。
+9. 新增 `tests/test_llm_client.py`，用 mock `urllib.request.urlopen` 覆盖 vLLM/OpenAI-compatible client 的 healthcheck、chat completion payload、`response_format` 传递、Qwen thinking 清理、JSON 抽取和 usage 解析。
+10. 更新 `README.md`，加入本地 vLLM 启动命令、GPU/端口调度方式、真实 actor 配置、scan10 fallback 命令和 vLLM actor 配置字段说明。
+
+本轮本地验证：
+
+1. `conda run -n rm python -m py_compile src/ntmemevo/llm/client.py tests/test_llm_client.py` 通过。
+2. `conda run -n rm python -m pytest tests/test_llm_client.py -q` 通过：`1 passed in 0.02s`。
+3. `conda run -n rm python -m pytest -q` 通过：`37 passed in 0.18s`。
+4. `conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` 通过。
+5. scan10 fallback 结果：`num_tasks=10`、`success_rate=1.0`、`avg_steps=8.5`、`avg_tool_calls=7.5`、`expected_actions_matched_count=10`、`expected_actions_failed_count=0`、`tool_observation_error_count=3`、`expected_negative_observation_count=3`、`tool_semantic_error_count=0`、`communicate_info_passed_count=3`、`nl_assertion_passed_count=3`、`unsupported_official_criteria_count=0`、`negative_transfer_rate=0.0`。
+6. 未运行 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`，原因是当前 `rm` 环境未安装 vLLM，且本轮不应在编码阶段占用 GPU 启动长驻服务。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+# 如需启动本地 Qwen/vLLM 服务，先在独立终端安装并启动：
+pip install -e ".[dev,vllm]"
+CUDA_VISIBLE_DEVICES=0 bash scripts/start_vllm_qwen35_9b.sh
+
+# 另一个终端确认服务可用：
+curl http://127.0.0.1:8000/v1/models
+
+# 如果改用非默认端口，例如 PORT=8001，实验前同步设置：
+export VLLM_BASE_URL=http://127.0.0.1:8001/v1
+
+# 官方 action-replay compatibility fallback：
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/metrics.json
+grep '"expected_negative_observations"' runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/runs.jsonl
+
+# 本地 Qwen/vLLM real actor no-memory smoke，默认只跑 base 前 1 条：
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/metrics.json
+tail -n 1 runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/runs.jsonl
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl || true
+```
+
+实验日志填写建议：
+
+1. vLLM 服务启动后，记录 `CUDA_VISIBLE_DEVICES`、`PORT`、`MODEL_PATH`、`SERVED_MODEL_NAME`、`MAX_MODEL_LEN`、`GPU_MEMORY_UTILIZATION` 和 vLLM 版本。
+2. 真实 actor no-memory 默认先记录 `max_tasks=1`，若通过或失败可解释，再手动把配置中的 `benchmark.max_tasks` 改为 `3` 复验。
+3. 对每条失败记录 `error_type`、`expected_actions_matched`、`state_diff_passed`、`communicate_info_passed`、`nl_assertions_passed`、`tool_observation_error_count`、`expected_negative_observation_count`、`policy_violation_count`、`tool_semantic_error_count` 和 `unsupported_official_criteria_count`。
+4. 若 vLLM/GPU 暂不可用，则先把 scan10 的 compatibility summary 写入实验日志，明确这是 action-replay oracle 兼容性报告，不是真实 actor 或 memory 方法收益实验。
+
+当前边界：
+
+1. 本轮完成真实 actor 的本地 vLLM 调用链路和配置，但没有在当前编码环境启动 vLLM 服务，也没有产生真实 Qwen actor 结果。
+2. `provider=vllm` 依赖外部长驻服务；推荐手动启动并固定 `CUDA_VISIBLE_DEVICES` / `PORT`，避免多实验抢同一 GPU 或端口。
+3. scan10 action-replay 结果只说明官方前 10 条 expected actions、communicate/nl assertion 和 observation taxonomy 在 oracle 下可解释，不代表真实 actor 能力。
+4. 第五轮仍处于 official adapter/evaluator/actor 对齐阶段，不报告 NT-MemEvo memory 方法收益。
+
+下一步建议：
+
+1. 在目标服务器启动 vLLM 后，先运行 `tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的 `max_tasks=1` smoke，检查是否存在 JSON 格式噪声、工具调用循环或 action mismatch。
+2. 若 `max_tasks=1` 可解释，再扩到 `max_tasks=3`，并与第四轮 action-replay 前 3 条的 taxonomy 对齐。
+3. 真实 no-memory actor 的 failure taxonomy 稳定后，再新增 `real_actor_raw_trace_rag` 小样本配置；`nt_memevo_gate`、support verification 和 scope refinement 继续暂缓。

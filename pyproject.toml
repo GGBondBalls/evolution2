@@ -19,6 +19,9 @@ dev = [
 openai = [
   "openai>=1.30.0",
 ]
+vllm = [
+  "vllm>=0.6.0",
+]
 
 [project.scripts]
 ntmemevo-run-stream = "ntmemevo.experiments.run_stream:main"

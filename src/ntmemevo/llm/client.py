@@ -4,6 +4,9 @@ import ast
 import json
 import os
 import re
+import time
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -364,6 +367,196 @@ class OpenAIChatClient(LLMClient):
         )
 
 
+class OpenAICompatibleChatClient(LLMClient):
+    """HTTP client for vLLM and other OpenAI-compatible chat servers.
+
+    The project uses this path for local Qwen/vLLM actors so experiments do not
+    require the OpenAI Python SDK or a hosted API key.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str = "http://127.0.0.1:8000/v1",
+        api_key: str = "EMPTY",
+        timeout_seconds: float = 120.0,
+        request_retries: int = 1,
+        retry_sleep_seconds: float = 1.0,
+        provider_name: str = "openai_compatible",
+        healthcheck: bool = True,
+        disable_response_format: bool = False,
+        extract_json_object: bool = False,
+        strip_thinking: bool = False,
+        extra_body: dict[str, Any] | None = None,
+    ) -> None:
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+        self.request_retries = max(0, request_retries)
+        self.retry_sleep_seconds = max(0.0, retry_sleep_seconds)
+        self.provider_name = provider_name
+        self.disable_response_format = disable_response_format
+        self.extract_json_object = extract_json_object
+        self.strip_thinking = strip_thinking
+        self.extra_body = dict(extra_body or {})
+        if healthcheck:
+            self._healthcheck()
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [message.__dict__ for message in messages],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if response_format and not self.disable_response_format:
+            payload["response_format"] = response_format
+        payload.update(self.extra_body)
+
+        response = self._request_json(
+            method="POST",
+            path="/chat/completions",
+            payload=payload,
+        )
+        choices = response.get("choices") or []
+        if not choices:
+            raise RuntimeError(
+                f"{self.provider_name} chat completion returned no choices."
+            )
+        message = choices[0].get("message") if isinstance(choices[0], dict) else {}
+        if not isinstance(message, dict):
+            message = {}
+        content = str(message.get("content") or "")
+        if self.strip_thinking:
+            content = _strip_thinking_blocks(content)
+        if self.extract_json_object and response_format:
+            content = _extract_first_json_object(content)
+
+        usage = response.get("usage") or {}
+        if not isinstance(usage, dict):
+            usage = {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+        return LLMResponse(
+            content=content,
+            model=str(response.get("model") or self.model),
+            usage=LLMUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            ),
+            raw={
+                "provider": self.provider_name,
+                "base_url": self.base_url,
+                "response": response,
+            },
+        )
+
+    def _healthcheck(self) -> None:
+        try:
+            self._request_json(method="GET", path="/models", payload=None)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Cannot reach {self.provider_name} server at {self.base_url}. "
+                "Start the local vLLM OpenAI-compatible service first, for example "
+                "`bash scripts/start_vllm_qwen35_9b.sh`, or set "
+                "`models.actor.healthcheck: false` for dry config construction."
+            ) from exc
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        url = f"{self.base_url}{path}"
+        body = None
+        if payload is not None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        attempts = self.request_retries + 1
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            request = urllib.request.Request(
+                url=url,
+                data=body,
+                headers=headers,
+                method=method,
+            )
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.timeout_seconds,
+                ) as handle:
+                    raw_body = handle.read().decode("utf-8")
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                last_error = RuntimeError(
+                    f"{self.provider_name} HTTP {exc.code} from {url}: {error_body}"
+                )
+            except (urllib.error.URLError, TimeoutError) as exc:
+                last_error = exc
+            else:
+                try:
+                    data = json.loads(raw_body)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"{self.provider_name} returned non-JSON response from {url}: "
+                        f"{raw_body[:500]}"
+                    ) from exc
+                if not isinstance(data, dict):
+                    raise RuntimeError(
+                        f"{self.provider_name} returned unexpected JSON type from {url}."
+                    )
+                return data
+            if attempt < attempts and self.retry_sleep_seconds:
+                time.sleep(self.retry_sleep_seconds)
+        raise RuntimeError(
+            f"{self.provider_name} request failed after {attempts} attempt(s): {last_error}"
+        )
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    stripped = re.sub(r"(?is)<think>.*?</think>", "", text).strip()
+    if "</think>" in stripped.lower():
+        stripped = re.split(r"(?i)</think>", stripped, maxsplit=1)[-1].strip()
+    return stripped
+
+
+def _extract_first_json_object(text: str) -> str:
+    candidate = text.strip()
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return json.dumps(parsed, ensure_ascii=False)
+
+    cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).replace("```", "")
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(cleaned):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(cleaned[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, ensure_ascii=False)
+    return candidate
+
+
 def create_llm_client(config: dict[str, Any]) -> LLMClient:
     provider = str(config.get("provider", "mock")).lower()
     model = str(config.get("model", "mock-tool-agent"))
@@ -374,4 +567,61 @@ def create_llm_client(config: dict[str, Any]) -> LLMClient:
         )
     if provider == "openai":
         return OpenAIChatClient(model=model)
+    if provider in {"vllm", "local_vllm", "openai_compatible"}:
+        base_url_env = str(config.get("base_url_env", "VLLM_BASE_URL"))
+        base_url = str(
+            os.getenv(base_url_env)
+            or config.get("base_url")
+            or os.getenv("OPENAI_BASE_URL")
+            or "http://127.0.0.1:8000/v1"
+        )
+        api_key = str(
+            _resolve_secret_config_value(
+                config.get("api_key"),
+                env_name=str(config.get("api_key_env", "VLLM_API_KEY")),
+                default="EMPTY",
+            )
+        )
+        raw_extra_body = config.get("extra_body") or config.get("request_body") or {}
+        if not isinstance(raw_extra_body, dict):
+            raise ValueError("models.actor.extra_body must be a mapping when provided.")
+        extra_body = dict(raw_extra_body)
+        for key in [
+            "top_p",
+            "top_k",
+            "min_p",
+            "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
+            "stop",
+        ]:
+            if key in config:
+                extra_body[key] = config[key]
+        return OpenAICompatibleChatClient(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            timeout_seconds=float(config.get("timeout_seconds", 120.0)),
+            request_retries=int(config.get("request_retries", 1)),
+            retry_sleep_seconds=float(config.get("retry_sleep_seconds", 1.0)),
+            provider_name=provider,
+            healthcheck=bool(config.get("healthcheck", True)),
+            disable_response_format=bool(config.get("disable_response_format", False)),
+            extract_json_object=bool(config.get("extract_json_object", True)),
+            strip_thinking=bool(config.get("strip_thinking", True)),
+            extra_body=extra_body,
+        )
     raise ValueError(f"Unsupported LLM provider: {provider}")
+
+
+def _resolve_secret_config_value(
+    value: Any,
+    env_name: str,
+    default: str,
+) -> str:
+    if value is None:
+        return os.getenv(env_name, default)
+    if isinstance(value, str) and value.startswith("env:"):
+        return os.getenv(value.removeprefix("env:"), default)
+    return str(value)

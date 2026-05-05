@@ -1,0 +1,34 @@
+experiment:
+  name: tau_retail_phase2_official_tau2_action_replay_scan10_seed1
+  seed: 1
+  output_dir: runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1
+
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: data/external/tau2-bench/data/tau2/domains/retail/tasks.json
+  task_split_file: data/external/tau2-bench/data/tau2/domains/retail/split_tasks.json
+  task_split: base
+  data_file: data/external/tau2-bench/data/tau2/domains/retail/db.json
+  evaluation: official_like
+  compare_action_args: true
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 10
+
+agent:
+  type: action_replay_agent
+  max_steps: 24
+  memory_top_k: 0
+
+models:
+  actor:
+    provider: action_replay
+    model: scripted-expected-actions
+    temperature: 0.0
+    max_tokens: 0
+
+logging:
+  save_raw_model_io: false
+  save_trace_events: true
+  save_costs: true
