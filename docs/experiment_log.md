@@ -2624,7 +2624,7 @@ grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_
 
 待填写。该实验是 action-replay oracle 兼容性扫描，用于在真实 actor/vLLM 服务不可用时继续检查官方数据、工具 observation taxonomy 和 evaluator 口径；不代表真实 LLM actor 能力，也不代表 memory 方法收益。
 
-## tau_retail_phase2_official_tau2_real_actor_nomem_seed1 第六轮输出协议加固复验待填
+## tau_retail_phase2_official_tau2_real_actor_nomem_seed1 第六轮输出协议加固复验完成
 
 ### 实验名称
 
@@ -2632,7 +2632,7 @@ grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_
 
 ### 日期与环境
 
-待填写。建议记录 Linux 机器标识、conda 环境 `rm`、Python/pytest/vLLM 版本、`VLLM_BASE_URL`、GPU 编号、`TENSOR_PARALLEL_SIZE`、`MAX_MODEL_LEN`、`GPU_MEMORY_UTILIZATION`。
+2026-05-05 用户复验补充。Linux 机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，`VLLM_BASE_URL=http://127.0.0.1:8000/v1`。用户本次未粘贴 vLLM 版本、GPU 编号、`TENSOR_PARALLEL_SIZE`、`MAX_MODEL_LEN` 和 `GPU_MEMORY_UTILIZATION`，后续扩样本时建议补齐。
 
 ### 运行命令
 
@@ -2674,46 +2674,103 @@ grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_real_actor
 
 ### 结果
 
-待填写。建议至少记录以下字段：
+第六轮第二次 hotfix 后，真实 Qwen/vLLM actor 的官方 tau2 retail base task `0` no-memory smoke 通过。核心指标如下：
 
 ```json
 {
-  "num_tasks": null,
-  "success_rate": null,
-  "avg_steps": null,
-  "avg_prompt_tokens": null,
-  "avg_completion_tokens": null,
-  "avg_tool_calls": null,
-  "expected_actions_matched_count": null,
-  "expected_actions_failed_count": null,
-  "tool_observation_error_count": null,
-  "expected_negative_observation_count": null,
-  "policy_violation_count": null,
-  "tool_semantic_error_count": null,
-  "unsupported_official_criteria_count": null,
+  "num_tasks": 1,
+  "success_rate": 1.0,
+  "avg_reward": 1.0,
+  "avg_steps": 6.0,
+  "avg_prompt_tokens": 8556.0,
+  "avg_completion_tokens": 933.0,
+  "avg_tool_calls": 5.0,
+  "evaluation_modes": {
+    "official_like": 1
+  },
+  "expected_actions_evaluated_count": 1,
+  "expected_actions_matched_count": 1,
+  "expected_actions_failed_count": 0,
+  "tool_observation_error_count": 0,
+  "expected_negative_observation_count": 0,
+  "policy_violation_count": 0,
+  "tool_semantic_error_count": 0,
+  "unsupported_official_criteria_count": 0,
   "evaluator_error_types": {}
 }
 ```
 
+本 run 的 memory/replay/verification 指标均为 0 或空集合，符合 `memory_policy=none` 的 no-memory smoke 设定：`memory_size=0`、`memory_top_k=0`、`negative_transfer_rate=0.0`、`gate_decision_count=0`、`utility_update_count=0`、`replay_result_count=0`、`verification_count=0`。
+
+工具链实际执行 5 次，且全部与官方 expected actions 匹配：
+
+1. `find_user_id_by_name_zip({"first_name":"Yusuf","last_name":"Rossi","zip":"19122"})`
+2. `get_order_details({"order_id":"W2378156"})`
+3. `get_product_details({"product_id":"1656367028"})`
+4. `get_product_details({"product_id":"4896585277"})`
+5. `exchange_delivered_order_items({"order_id":"#W2378156","item_ids":["1151293680","4983901480"],"new_item_ids":["7706410293","7747408585"],"payment_method_id":"credit_card_9513926"})`
+
+`trace_events.jsonl` 出现 `expected_actions_complete`：
+
+```json
+{
+  "run_id": "tau_retail_phase2_official_tau2_real_actor_nomem_seed1_0",
+  "task_id": "0",
+  "step": 5,
+  "event_type": "expected_actions_complete",
+  "tool_calls": 5,
+  "final_answer": "Order W2378156 exchange requested for item_ids=['1151293680', '4983901480']; product_ids=['7706410293', '7747408585']."
+}
+```
+
+该事件说明 `agent.stop_after_expected_actions=true` 已生效：agent 在第 5 次工具调用后停止，没有再次调用 `exchange_delivered_order_items`，也没有回到第二次 hotfix 前的 `lookup_policy({"policy_name":"exchange"})` 循环。
+
 ### 抽查重点
 
-1. `trace_events.jsonl` 是否出现 `model_action_repair`。
-2. 若出现 repair，记录 `repair_reason`、`action_before`、`action_after`、`tool_name`、`args`，并确认 repair 来自结构化 `tool`/`tool_name` 和 dict `args`/`arguments`，不是从 thought 中猜测。
-3. 若仍出现 `unsupported_action`，记录最后一条 `model_decision` 的 `repair_status`、`repair_reason`、`raw_response` 和 `parsed_decision`。
-4. 若 task `0` 越过第五轮第二步，记录新的工具链深度：是否调用 `get_order_details`，是否继续调用 `get_product_details`，是否最终调用 `exchange_delivered_order_items`。
-5. 若失败类型变化，记录 `runs.jsonl.evaluation_details` 中的 action/state/communicate/nl/tool taxonomy。
-6. 第二次 hotfix 后额外检查 `grep '"event_type": "expected_actions_complete"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl`；若出现该事件，task `0` 不应再继续调用第二次 `exchange_delivered_order_items` 或重复 `lookup_policy(exchange)`。
+1. 本次没有出现 `model_action_repair`，5 条 `model_decision` 的 `repair_status` 均为 `not_needed`，说明第六轮 prompt/protocol hardening 后模型直接输出了合法 JSON tool action。
+2. 本次没有出现 `model_parse_error`，也没有 `unsupported_action`；第五轮第二步“模型知道要查订单，但 action 为空且 raw response 不可审计”的问题未复现。
+3. 5 条 `model_decision` 均包含 `raw_response` 和 `parsed_decision`，满足第六轮可审计 raw model response 日志目标。
+4. task `0` 已越过第五轮第二步，完整推进到 `get_order_details`、两次 `get_product_details` 和最终 `exchange_delivered_order_items`。
+5. `runs.jsonl.evaluation_details.expected_actual_action_alignment` 中 5 个 expected actions 全部 `matched=true`；`actual_action_count=5`，`expected_action_count=5`，`action_mismatches=[]`。
+6. `state_diff_summary` 记录订单 `#W2378156` 从 `delivered` 变为 `exchange requested`，并记录 `exchange_item_ids=["1151293680","4983901480"]`、`exchange_new_item_ids=["7706410293","7747408585"]`、`exchange_payment_method_id="credit_card_9513926"` 和 `exchange_price_difference=-16.63`。当前 `official_like` 成功主要由 expected action 匹配给出，`state_diff_evaluated_count=0` 是该官方样本未走 state-diff 断言的结果，不是状态更新缺失。
 
 ### 现象与问题
 
-待填写。重点判断第六轮是否解决第五轮“第二步 action 为空但 raw response 不可审计”的问题：
+本次结果表明第六轮输出协议加固与第二次 hotfix 均达到本轮验收目标：
 
-1. 如果 repair 生效并推进到更深工具链，本轮通过输出协议加固验收，下一步可分析新的失败 taxonomy。
-2. 如果仍失败但 raw response、parsed decision 和不可修复原因可见，本轮也满足诊断验收，下一步应根据原始输出调整 prompt 或 parser。
-3. 如果 trace 中仍缺 raw response 或 repair 字段，说明第六轮日志验收未通过，应先修 trace 再扩样本。
-4. 如果再次出现 `maximum context length is 4096 tokens`，记录当时 vLLM 报出的 prompt tokens、requested output tokens 和配置中的 `max_tokens`；正常情况下 hotfix 后首轮不应再因 `1536` 输出预算越界。
-5. 如果 real actor 已完成 5 个 expected actions 但仍 `max_steps_exceeded`，说明 `stop_after_expected_actions` 未生效，应先检查配置是否已更新并重新安装 editable 包。
+1. 第五轮的 `unsupported_action` 黑盒失败已被消除：第二步 `get_order_details` 直接合法输出并成功执行。
+2. 第一轮 hotfix 解决的 vLLM context overflow 未在本次结果中表现为 run failure；当前配置中的 `max_tokens=512` 和 `context_overflow_margin_tokens=256` 可作为后续小样本真实 actor smoke 的基线。
+3. 第二次 hotfix 解决的完成 expected actions 后继续循环问题已被消除：`expected_actions_complete` 在 step 5 写出，run 以第 5 次工具 observation 作为 final answer 结束。
+4. 本次没有引入 memory 相关变量，因此不能解释 raw-trace-rag、NT-MemEvo gate、replay 或 verification 的收益；只能说明官方 tau2 real actor no-memory task `0` 的执行链路、日志链路和 evaluator 链路已经闭环。
+5. 当前样本量仍为 1，不能代表真实 actor 在 base split 上稳定。第六轮可以按 max_tasks=1 验收结束，但下一轮需要先做 no-memory 小批量扩样本，确认 failure taxonomy 不再集中于输出协议或 stop-control 问题。
 
 ### 下一步
 
-待填写。默认建议：只有 `max_tasks=1` 的失败已经可审计并且不再停留在第五轮同一 `unsupported_action` 黑盒状态后，才将 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的 `benchmark.max_tasks` 临时改为 `3` 复验。raw-trace-rag、`nt_memevo_gate`、support verification 和 memory 方法收益实验继续暂缓。
+第六轮可结束。下一轮不应立即进入 memory 方法收益主实验，而应先做真实 actor no-memory 小批量稳定性扫描：
+
+1. 将 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 复制为临时 scan3 配置，保持 `agent.stop_after_expected_actions=true`、`max_tokens=512`、`context_overflow_margin_tokens=256`，仅把 `experiment.name`、`experiment.output_dir` 和 `benchmark.max_tasks` 调整为 scan3。
+2. 运行官方 tau2 retail base 前 3 条 no-memory real actor smoke，检查 `expected_actions_complete`、`model_action_repair`、`model_parse_error`、`unsupported_action`、`max_steps_exceeded` 和 tool/evaluator taxonomy。
+3. 若 scan3 中 task `0` 继续稳定且新增失败有明确 taxonomy，再新增 raw-trace-rag real actor 小样本配置；在 no-memory 与 raw-trace-rag 都可解释前，继续暂缓 `nt_memevo_gate`、support verification 和 memory 方法收益对比。
+
+建议命令：
+
+```bash
+cp configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml /tmp/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+python - <<'PY'
+from pathlib import Path
+p = Path("/tmp/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml")
+s = p.read_text()
+s = s.replace("name: tau_retail_phase2_official_tau2_real_actor_nomem_seed1", "name: tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1")
+s = s.replace("output_dir: runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1", "output_dir: runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1")
+s = s.replace("max_tasks: 1", "max_tasks: 3")
+p.write_text(s)
+PY
+
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+python -m ntmemevo.experiments.run_stream --config /tmp/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/metrics.json
+grep '"event_type": "expected_actions_complete"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl
+grep '"event_type": "model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs.jsonl
+```

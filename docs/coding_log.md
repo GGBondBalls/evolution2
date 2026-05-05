@@ -1960,3 +1960,35 @@ grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_re
 6. `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 开启 `agent.stop_after_expected_actions: true`，并将 `max_tokens` 进一步收紧为 `512`、`context_overflow_margin_tokens` 调整为 `256`，避免长 observation 后每步都先触发 context overflow。
 7. 新增测试覆盖：`test_react_agent_can_stop_after_expected_actions_complete` 和 `test_tau_retail_env_reports_expected_actions_completed`。
 8. 验证记录：`conda run -n rm python -m pytest tests/test_react_agent.py tests/test_tau_bench_adapter.py tests/test_llm_client.py -q` 通过，结果为 `28 passed in 0.13s`；`conda run -n rm python -m pytest -q` 通过，结果为 `43 passed in 0.15s`；`conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` 仍为 `success_rate=1.0`、`expected_actions_matched_count=10`、`tool_semantic_error_count=0`。
+
+第六轮用户复验完成：
+
+1. 用户在本地 vLLM 服务可用后运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`，`tau_retail_phase2_official_tau2_real_actor_nomem_seed1` 真实 actor no-memory smoke 通过。
+2. 结果：`num_tasks=1`、`success_rate=1.0`、`avg_reward=1.0`、`avg_steps=6.0`、`avg_prompt_tokens=8556.0`、`avg_completion_tokens=933.0`、`avg_tool_calls=5.0`。
+3. official-like evaluator 结果：`expected_actions_evaluated_count=1`、`expected_actions_matched_count=1`、`expected_actions_failed_count=0`、`policy_violation_count=0`、`tool_observation_error_count=0`、`expected_negative_observation_count=0`、`tool_semantic_error_count=0`、`unsupported_official_criteria_count=0`、`evaluator_error_types={}`。
+4. `trace_events.jsonl` 写出 `expected_actions_complete`，发生在 step 5，`tool_calls=5`，final answer 为 `Order W2378156 exchange requested for item_ids=['1151293680', '4983901480']; product_ids=['7706410293', '7747408585'].`
+5. 实际工具链为 `find_user_id_by_name_zip -> get_order_details -> get_product_details(1656367028) -> get_product_details(4896585277) -> exchange_delivered_order_items`，5 个工具调用均与官方 expected actions 对齐。
+6. 本次没有出现 `model_action_repair` 或 `model_parse_error`；5 条 `model_decision` 的 `repair_status` 均为 `not_needed`，并且在 `logging.save_raw_model_io=true` 下保留了 `raw_response` 与 `parsed_decision`。
+7. 第五轮第二步 `unsupported_action` 黑盒失败、第一轮 hotfix 的 context overflow run failure，以及第二次 hotfix 前的 expected actions 完成后继续循环问题，本次均未复现。
+8. `docs/experiment_log.md` 已将 `tau_retail_phase2_official_tau2_real_actor_nomem_seed1 第六轮输出协议加固复验` 从待填更新为完成，并记录 metrics、工具链、trace 抽查结论和下一轮 scan3 命令。
+
+第六轮验收结论：
+
+1. 第二阶段第六轮可以按 `max_tasks=1` real actor official-like smoke 验收结束；本轮目标不是证明方法收益，而是让真实 actor 输出协议、raw response 日志、context overflow 重试和 expected-action stop-control 形成可复验闭环。
+2. 当前样本量仍只有官方 tau2 retail base task `0`，因此不能直接进入 memory 方法主实验，也不能把 no-memory 成功率当作整体 benchmark 结论。
+3. 下一轮应先扩真实 actor no-memory 小样本，确认新增失败能落入明确 taxonomy；只有 no-memory 小样本稳定可解释后，才新增 raw-trace-rag real actor 小样本，再考虑 NT-MemEvo gate/replay/verification。
+
+## 第二阶段第七轮方向
+
+优先方向：真实 actor no-memory 小批量稳定性扫描与 failure taxonomy 扩样本。理由是第六轮已经解决了 task `0` 上的输出协议、上下文预算和完成后停止问题，但当前只验证了 `max_tasks=1`；进入 memory 方法收益实验前，应先确认 Qwen/vLLM real actor 在官方 tau2 retail base 前 3 条任务上的失败类型是否可解释、可复现，避免把基础 actor 不稳定误归因给 memory。
+
+第七轮建议范围：
+
+1. 新增或临时生成 `tau_retail_phase2_official_tau2_real_actor_nomem_scan3` 配置，保持 `agent.stop_after_expected_actions=true`、`models.actor.max_tokens=512`、`context_overflow_margin_tokens=256`、`temperature=0.0`、`logging.save_raw_model_io=true`，只把 `benchmark.max_tasks` 扩到 `3` 并输出独立 run 目录。
+2. 运行官方 tau2 retail base 前 3 条 no-memory real actor smoke，记录每个 task 的 `success`、`error_type`、`expected_actions_complete`、`model_action_repair`、`model_parse_error`、`unsupported_action`、`max_steps_exceeded`、tool observation taxonomy 和 evaluator details。
+3. 若 scan3 成功率低，优先分析 actor/tool/evaluator 基础失败，不进入 memory 对比；若失败集中在可修复 parser/prompt/stop-control 问题，先补编码与测试。
+4. 若 scan3 至少能稳定产生可审计 taxonomy，再新增 `tau_retail_phase2_official_tau2_real_actor_raw_trace_rag` 小样本配置，用同一批 task 对比 no-memory 与 raw-trace-rag 的日志形态，但仍不做最终方法收益结论。
+5. 保持 action-replay scan10 作为 adapter/evaluator compatibility guardrail；任何真实 actor 扩样本前后都应确认 action-replay expected-action 口径未回归。
+6. 暂缓 `nt_memevo_gate`、support verification、scope refinement 和 memory replay 主实验，直到 no-memory/raw-trace real actor 的小样本失败能被稳定解释。
+
+第七轮初始实验命令已写入 `docs/experiment_log.md` 的第六轮复验记录末尾；建议先使用 `/tmp` 临时 scan3 配置运行，结果稳定后再固化到 `configs/`。
