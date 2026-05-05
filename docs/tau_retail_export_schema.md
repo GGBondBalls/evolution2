@@ -271,10 +271,33 @@ Tau-retail runs write per-task evaluator details to `runs.jsonl` under
 5. `state_diff_passed`
 6. `state_diff_summary`
 7. `state_diff_mismatches`
-8. `policy_violation_count`
-9. `policy_violations`
-10. `tool_semantic_error_count`
-11. `tool_semantic_errors`
+8. `expected_actual_action_alignment`
+9. `policy_violation_count`
+10. `policy_violations`
+11. `tool_observation_error_count`
+12. `tool_observation_errors`
+13. `expected_negative_observation_count`
+14. `expected_negative_observations`
+15. `tool_semantic_error_count`
+16. `tool_semantic_errors`
+
+Phase two uses a stricter tool observation taxonomy. `tool_observation_error_count`
+counts every tool call whose runtime result is `ok=false`. Those observations are
+then split into explainable subclasses:
+
+1. `expected_negative_observation_count`: a matched expected read-only action
+   returned a negative observation, such as an official expected
+   `get_product_details` call for a product id that is absent from the current
+   DB.
+2. `policy_violation_count`: a mutation or precondition-sensitive tool failed
+   because the requested operation violates local retail policy or order state.
+3. `tool_semantic_error_count`: the remaining unexpected tool failures after
+   expected negative observations and policy violations have been removed.
+
+`official_like` treats unexpected policy violations, true semantic tool errors,
+and unsupported official criteria as fatal for local success. Matched expected
+read negative observations are logged for auditability but are not fatal by
+themselves.
 
 ## Known Blockers
 

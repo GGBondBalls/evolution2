@@ -2321,3 +2321,138 @@ action-replay `metrics.json` 关键字段：
 3. `tau_retail_phase2_official_tau2_action_replay.yaml` 不再把 expected negative lookup 与真正 tool semantic error 混在一起；task `2` 的失败原因必须有官方一致解释。
 4. `runs.jsonl.evaluation_details` 能同时说明 action match、tool observation、DB state、communicate/nl assertion 和 unsupported criterion 的状态。
 5. 若引入真实 LLM actor smoke，只做 `max_tasks=1/3`，并先报告 no-memory 可解释失败类型，不报告 memory 方法收益。
+
+## tau_retail_phase2_official_tau2_action_replay_seed1 第四轮 observation taxonomy 复验
+
+### 实验名称
+
+`tau_retail_phase2_official_tau2_action_replay_seed1_round4_observation_taxonomy`
+
+### 日期与环境
+
+2026-05-05，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+### 官方数据来源
+
+1. `data/external/tau-bench` commit：`59a200c6d575d595120f1cb70fea53cef0632f6b`。
+2. `data/external/tau2-bench` commit：`2be691669909439cf88dedc13decf94b7664d262`。
+3. 官方 tau2 retail 数据路径：`data/external/tau2-bench/data/tau2/domains/retail/`。
+4. 本轮仍使用官方 base split 前 3 条任务，重点复验 observation taxonomy，不扩大任务规模。
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+git -C data/external/tau-bench rev-parse HEAD
+git -C data/external/tau2-bench rev-parse HEAD
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay.yaml
+
+cat runs/tau_retail_phase2_official_tau2_action_replay_seed1/metrics.json
+grep '6086499569' runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl
+grep '"expected_negative_observations"' runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl
+grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl
+```
+
+### 配置文件
+
+1. `configs/tau_retail_phase2_state_nomem.yaml`
+2. `configs/tau_retail_phase2_state_raw_trace_rag.yaml`
+3. `configs/tau_retail_phase2_official_tau2_nomem.yaml`
+4. `configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml`
+5. `configs/tau_retail_phase2_official_tau2_action_replay.yaml`
+
+### 结果
+
+`python -m pytest` 结果：
+
+```text
+36 passed in 0.11s
+```
+
+同轮完整复验摘要：
+
+| config | success_rate | avg prompt | expected actions | communicate info | nl assertion | tool observation | expected negative | policy violation | tool semantic | memory | 结论 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tau_retail_phase2_state_nomem.yaml` | 0.6666666666666666 | 1011.3333333333334 | `3/3 matched` | `0/0` | `0/0` | 1 | 0 | 1 | 0 | `none,size=0` | 本地 state fixture 稳定，pending return 仍按预期触发 policy violation，但不再算作 semantic error |
+| `tau_retail_phase2_state_raw_trace_rag.yaml` | 0.6666666666666666 | 1354.6666666666667 | `3/3 matched` | `0/0` | `0/0` | 1 | 0 | 1 | 0 | `raw_trace_rag,size=3,top_k=2` | 与 no-memory evaluator 结论一致，只增加 raw trace 检索和写入 |
+| `tau_retail_phase2_official_tau2_nomem.yaml` | 0.0 | 988.0 | `0/3 matched` | `0/1 passed` | `0/1 passed` | 0 | 0 | 0 | 0 | `none,size=0` | mock actor 仍不能覆盖官方多步 expected actions，也未表达 task 2 NL 要求 |
+| `tau_retail_phase2_official_tau2_raw_trace_rag.yaml` | 0.0 | 1279.6666666666667 | `0/3 matched` | `0/1 passed` | `0/1 passed` | 0 | 0 | 0 | 0 | `raw_trace_rag,size=3,top_k=2` | raw trace 写入/检索正常，但 actor mismatch 未被 memory 解决 |
+| `tau_retail_phase2_official_tau2_action_replay.yaml` | 1.0 | 0.0 | `3/3 matched` | `1/1 passed` | `1/1 passed` | 1 | 1 | 0 | 0 | `none,size=0` | action replay 全部通过；task 2 的 not-found product 被归为 expected negative observation |
+
+action-replay 第四轮 `metrics.json` 关键字段：
+
+```json
+{
+  "num_tasks": 3,
+  "success_rate": 1.0,
+  "avg_reward": 1.0,
+  "avg_steps": 8.0,
+  "avg_prompt_tokens": 0.0,
+  "avg_completion_tokens": 0.0,
+  "avg_tool_calls": 7.0,
+  "evaluation_modes": {
+    "official_like": 3
+  },
+  "expected_actions_evaluated_count": 3,
+  "expected_actions_matched_count": 3,
+  "expected_actions_failed_count": 0,
+  "policy_violation_count": 0,
+  "tool_observation_error_count": 1,
+  "expected_negative_observation_count": 1,
+  "tool_semantic_error_count": 0,
+  "communicate_info_evaluated_count": 1,
+  "communicate_info_passed_count": 1,
+  "communicate_info_failed_count": 0,
+  "nl_assertion_evaluated_count": 1,
+  "nl_assertion_passed_count": 1,
+  "nl_assertion_failed_count": 0,
+  "unsupported_official_criteria_count": 0,
+  "evaluator_error_types": {},
+  "negative_transfer_rate": 0.0,
+  "memory_policy": "none",
+  "memory_size": 0,
+  "memory_top_k": 0
+}
+```
+
+### 抽查结果
+
+1. task `2` 仍完整执行 11 步 official expected actions，`expected_actions_matched=true`、`actual_action_count=11`。
+2. `get_product_details({"product_id": "6086499569"})` 的 observation 仍为 `Product 6086499569 was not found.`，对应 alignment row 为 `matched=true`、`actual_ok=false`，并记录 `actual_observation`。
+3. 该 not-found observation 被写入 `evaluation_details.expected_negative_observations`，classification 为 `expected_negative_observation`，reason 为 `matched_expected_read_action_returned_error`。
+4. task `2` 的 `communicate_info_expected=["10"]` 通过，`nl_assertions_expected=["Agent should tell the user that there are 10 t-shirt options available."]` 通过；action-replay 的最终回答为传达 required information `10`。
+5. `grep '"tool_semantic_errors": []'` 可见三条 action-replay run 均无剩余 semantic error；`evaluator_error_types={}`，说明第三轮的唯一失败已被新 taxonomy 解释掉。
+6. 本地 phase2 state fixture 的 pending return 仍是 `policy_violation`，但新口径下表现为 `tool_observation_error_count=1`、`policy_violation_count=1`、`tool_semantic_error_count=0`。
+
+### 现象与问题
+
+第四轮复验通过。第三轮 action-replay 的剩余失败不再解释为 adapter/tool semantic bug，而是解释为 official expected read action 的负向观察：action 本身是官方 expected action，参数匹配，工具查不到 `6086499569`，但官方 action/env evaluator 口径并不把 read-only golden action 的 not-found observation 直接作为 fatal failure。
+
+本轮也验证了 failure taxonomy 的边界：
+
+1. `tool_observation_error_count` 是所有 `ok=false` 工具观察的总数。
+2. `expected_negative_observation_count` 是 matched expected read action 返回错误的可解释子类。
+3. `policy_violation_count` 是 mutation/precondition 类工具失败的可解释子类。
+4. `tool_semantic_error_count` 只表示非 expected-negative、非 policy violation 的剩余真正工具语义错误。
+
+官方 mock no-memory/raw-trace-rag 的 `success_rate=0.0` 仍是 actor 能力边界：mock actor 没有完成多步 expected action sequence，也没有表达 task `2` 的 communicate/nl assertion。raw trace 检索正常，但不能解决 actor mismatch。因此本轮仍不报告 memory 方法收益。
+
+### 下一轮方向
+
+第二阶段第五轮应进入官方 tau2 真实 actor no-memory 小批量 smoke 与 reward-basis 兼容性报告。
+
+建议范围：
+
+1. 优先新增真实 actor no-memory 配置，默认 `max_tasks=1/3`、`evaluation=official_like`、`compare_action_args=true`、temperature 固定为 `0.0`，只记录 failure taxonomy。
+2. 若真实 LLM API key 暂不可用，先扩 action-replay compatibility scan 到官方 base 前 10/20 条，统计 read negative observation、policy/precondition violation、unsupported criterion、state diff mismatch 和 communicate/nl assertion 覆盖。
+3. 在实验日志中单独列出 ACTION、DB/state、COMMUNICATE、NL_ASSERTION、unsupported criterion 和 tool observation taxonomy 的通过/失败数量，说明哪些字段进入本地 `official_like.success`。
+4. 真实 actor no-memory 结果稳定前，不迁移 `raw_trace_rag` 以外的 memory 方法；`nt_memevo_gate`、support verification 和 scope refinement 继续暂缓。
+5. 第五轮仍只用于 official adapter/evaluator/actor 对齐，不用于报告 NT-MemEvo 方法收益。

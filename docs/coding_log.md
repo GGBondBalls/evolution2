@@ -1701,3 +1701,43 @@ grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_
 2. 继续对齐 official reward basis：区分 DB、ACTION、COMMUNICATE、NL_ASSERTION 是否进入最终 reward，而不是只作为 detail 记录。
 3. 对官方更多 task 的 read negative observation、mutation policy failure 和 unsupported criterion 做批量扫描，形成 official compatibility report。
 4. 真实 no-memory actor 失败类型稳定后，再迁移 `raw_trace_rag` 对照；`nt_memevo_gate`、support verification 和 scope refinement 仍暂缓。
+
+用户正式复验记录：
+
+1. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下运行 `python -m pytest`，环境为 Python 3.12.13、pytest 9.0.3、pluggy 1.6.0，结果为 `36 passed in 0.11s`。
+2. 用户确认官方仓库版本：`data/external/tau-bench` commit 为 `59a200c6d575d595120f1cb70fea53cef0632f6b`，`data/external/tau2-bench` commit 为 `2be691669909439cf88dedc13decf94b7664d262`。
+3. `tau_retail_phase2_state_nomem.yaml` 复验通过：`success_rate=0.6666666666666666`、`expected_actions_matched_count=3`、`state_diff_passed_count=1`、`policy_violation_count=1`、`tool_observation_error_count=1`、`expected_negative_observation_count=0`、`tool_semantic_error_count=0`、`memory_policy=none`。
+4. `tau_retail_phase2_state_raw_trace_rag.yaml` 复验通过：`success_rate=0.6666666666666666`、`memory_policy=raw_trace_rag`、`memory_size=3`、`memory_top_k=2`、`policy_violation_count=1`、`tool_observation_error_count=1`、`tool_semantic_error_count=0`、`negative_transfer_rate=0.0`。
+5. `tau_retail_phase2_official_tau2_nomem.yaml` 复验通过并按预期失败：`success_rate=0.0`、`expected_actions_matched_count=0`、`expected_actions_failed_count=3`、`communicate_info_failed_count=1`、`nl_assertion_failed_count=1`、`tool_observation_error_count=0`、`tool_semantic_error_count=0`、`negative_transfer_rate=0.0`。
+6. `tau_retail_phase2_official_tau2_raw_trace_rag.yaml` 复验通过并按预期失败：`success_rate=0.0`、`memory_policy=raw_trace_rag`、`memory_size=3`、`memory_top_k=2`、`expected_actions_failed_count=3`、`communicate_info_failed_count=1`、`nl_assertion_failed_count=1`、`tool_observation_error_count=0`、`negative_transfer_rate=0.0`。
+7. `tau_retail_phase2_official_tau2_action_replay.yaml` 复验通过：`success_rate=1.0`、`avg_steps=8.0`、`avg_tool_calls=7.0`、`avg_prompt_tokens=0.0`、`expected_actions_matched_count=3`、`expected_actions_failed_count=0`、`communicate_info_passed_count=1`、`nl_assertion_passed_count=1`、`tool_observation_error_count=1`、`expected_negative_observation_count=1`、`tool_semantic_error_count=0`、`evaluator_error_types={}`。
+8. 用户抽查 `runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl`，确认 task `2` 的 `get_product_details({"product_id": "6086499569"})` 仍返回 `Product 6086499569 was not found.`，但该 action 在 expected-vs-actual alignment 中 `matched=true`、`actual_ok=false`，并被归入 `expected_negative_observations`。
+9. 用户用 `grep '"expected_negative_observations"'` 确认 task `2` 记录包含 expected negative observation；用 `grep '"tool_semantic_errors": []'` 确认三条 action-replay 任务均无剩余 tool semantic error。
+
+复验结论：
+
+1. 第二阶段第四轮 observation taxonomy 已通过目标环境复验。第三轮 action-replay 的剩余失败从 `tool_semantic_error` 被正确重分类为 `expected_negative_observation`，官方 tau2 前 3 条 base task 在 action-replay oracle 下全部通过。
+2. 本轮 evaluator 口径变化不改变 mock actor 的能力边界：官方 no-memory/raw-trace-rag 仍因 action sequence mismatch 与自然语言断言缺失失败，不能解释为 memory 方法失败或负迁移。
+3. 当前日志口径已经能同时区分 `tool_observation_error_count`、`policy_violation_count`、`expected_negative_observation_count` 和严格意义的 `tool_semantic_error_count`。后续实验必须按新口径解读历史 phase2 state 结果。
+4. `docs/experiment_log.md` 已新增第四轮 observation taxonomy 复验补充；`docs/tau_retail_export_schema.md` 已同步 evaluator detail 字段说明。
+
+## 第二阶段第五轮方向（基于第四轮复验）
+
+优先方向：官方 tau2 真实 actor no-memory 小批量 smoke 与 reward-basis 兼容性报告。理由是第四轮已经让 action-replay oracle 在官方前 3 条 base task 上全部通过，adapter/evaluator 对 expected negative observation 的口径也稳定；下一步应验证真实 actor 在官方 tau2 retail 上的失败是否能被同一套 taxonomy 解释，而不是继续扩 action-replay 的方法链路。
+
+第五轮建议范围：
+
+1. 新增或整理真实 actor no-memory 配置，例如 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`，默认 `max_tasks=1/3`、`evaluation=official_like`、`compare_action_args=true`、temperature 固定为 `0.0`，输出独立 run 目录。
+2. 若当前环境没有可用真实 LLM API key，则先做 action-replay compatibility scan：把官方 base split 从前 3 条扩到 `max_tasks=10/20`，只统计 read negative observation、policy/precondition violation、unsupported criterion、state diff mismatch 和 communicate/nl assertion 覆盖情况。
+3. 明确 reward basis 报告字段：ACTION、DB/state、COMMUNICATE、NL_ASSERTION、unsupported criteria、tool observation taxonomy 分别通过/失败多少次，以及哪些字段进入本地 `official_like.success` 的 fatal 判定。
+4. 对真实 actor no-memory 结果只报告可解释失败类型和日志完整性，不报告 NT-MemEvo 方法收益；只有 no-memory 失败 taxonomy 稳定后，才迁移 `raw_trace_rag`。
+5. 保持第四轮五组配置不回归，尤其是 action-replay 的 `success_rate=1.0`、`expected_negative_observation_count=1`、`tool_semantic_error_count=0`，以及官方 mock no-memory/raw-trace-rag 的 `negative_transfer_rate=0.0`。
+6. 暂缓 `nt_memevo_gate`、support verification、scope refinement 和更大规模 memory 方法对照；这些需要等真实 actor no-memory 与 raw-trace-rag failure taxonomy 稳定后再进入主线。
+
+第五轮验收标准：
+
+1. `python -m pytest` 全量通过。
+2. 第四轮五组复验命令继续可运行，metrics 字段口径不回退。
+3. 真实 actor no-memory smoke 至少完成 `max_tasks=1`；若运行到 `max_tasks=3`，每条失败必须在 `runs.jsonl.evaluation_details` 中给出 action/state/communicate/nl/tool taxonomy。
+4. 若真实 actor 不可用，action-replay compatibility scan 至少覆盖官方 base 前 10 条，并产出可写入 `docs/experiment_log.md` 的 compatibility summary。
+5. `docs/experiment_log.md` 新增第五轮实验记录，明确当前仍处于 official adapter/evaluator/actor 对齐阶段，不进入 memory 方法收益结论。
