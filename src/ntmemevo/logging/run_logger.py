@@ -29,13 +29,20 @@ class RunLogger:
             path = self.output_dir / name
             path.write_text("", encoding="utf-8")
 
-    def log_run(self, experiment_id: str, iteration: int, result: AgentResult, memory_policy: str) -> None:
+    def log_run(
+        self,
+        experiment_id: str,
+        iteration: int,
+        result: AgentResult,
+        memory_policy: str,
+        agent_type: str = "react_tool_agent",
+    ) -> None:
         record = {
             "run_id": f"{experiment_id}_{result.task_id}",
             "experiment_id": experiment_id,
             "task_id": result.task_id,
             "iteration": iteration,
-            "agent": "react_tool_agent",
+            "agent": agent_type,
             "memory_policy": memory_policy,
             "success": result.success,
             "reward": result.reward,

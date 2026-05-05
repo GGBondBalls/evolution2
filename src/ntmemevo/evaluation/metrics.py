@@ -40,6 +40,12 @@ def aggregate_evaluation_details(results: list[AgentResult]) -> dict[str, object
     action_evaluated = [
         detail for detail in details if detail.get("expected_actions_matched") is not None
     ]
+    communicate_evaluated = [
+        detail for detail in details if detail.get("communicate_info_passed") is not None
+    ]
+    nl_assertion_evaluated = [
+        detail for detail in details if detail.get("nl_assertions_passed") is not None
+    ]
     return {
         "evaluation_modes": dict(sorted(modes.items())),
         "state_diff_evaluated_count": len(state_diff_evaluated),
@@ -61,6 +67,23 @@ def aggregate_evaluation_details(results: list[AgentResult]) -> dict[str, object
         ),
         "tool_semantic_error_count": sum(
             int(detail.get("tool_semantic_error_count") or 0) for detail in details
+        ),
+        "communicate_info_evaluated_count": len(communicate_evaluated),
+        "communicate_info_passed_count": sum(
+            1 for detail in communicate_evaluated if detail.get("communicate_info_passed") is True
+        ),
+        "communicate_info_failed_count": sum(
+            1 for detail in communicate_evaluated if detail.get("communicate_info_passed") is False
+        ),
+        "nl_assertion_evaluated_count": len(nl_assertion_evaluated),
+        "nl_assertion_passed_count": sum(
+            1 for detail in nl_assertion_evaluated if detail.get("nl_assertions_passed") is True
+        ),
+        "nl_assertion_failed_count": sum(
+            1 for detail in nl_assertion_evaluated if detail.get("nl_assertions_passed") is False
+        ),
+        "unsupported_official_criteria_count": sum(
+            int(detail.get("unsupported_official_criteria_count") or 0) for detail in details
         ),
         "evaluator_error_types": dict(sorted(error_types.items())),
     }

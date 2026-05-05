@@ -22,6 +22,7 @@ Current scope:
 16. Run tau-retail smoke baselines for `none`, `raw_trace_rag`, `reflexion`, `nt_memevo_candidate`, and `nt_memevo_gate`.
 17. Run phase-two tau-retail state/evaluator alignment checks with task-level DB reset, mutation-tool semantics, state-diff details, action-argument normalization, and policy/precondition violation logging.
 18. Run phase-two probes directly against a cloned official `sierra-research/tau2-bench` retail checkout, including official nested task loading, split filtering, and raw-trace memory logging.
+19. Run a phase-two official tau2 action-replay oracle that executes `evaluation_criteria.actions` step by step and separates actor mismatch from tool/evaluator semantic gaps.
 
 ## Environment
 
@@ -133,6 +134,7 @@ git clone https://github.com/sierra-research/tau2-bench.git data/external/tau2-b
 
 python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml
 python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay.yaml
 ```
 
 `data/external/` is ignored by git. The old `tau-bench` repository is kept for
@@ -312,9 +314,15 @@ evaluation_mode
 answer_contains_passed
 expected_actions_matched
 action_mismatches
+expected_actual_action_alignment
 state_diff_passed
 state_diff_summary
 state_diff_mismatches
+communicate_info_passed
+communicate_info_mismatches
+nl_assertions_passed
+nl_assertion_mismatches
+unsupported_official_criteria
 policy_violation_count
 policy_violations
 tool_semantic_error_count
@@ -322,7 +330,7 @@ tool_semantic_errors
 ```
 
 `metrics.json` also includes `with_memory_fail_no_memory_success`, `negative_transfer_rate`, `harmful_memory_ids`, and gate acceptance/rejection counts.
-Tau-retail evaluator-alignment runs additionally report `evaluation_modes`, `state_diff_evaluated_count`, `state_diff_passed_count`, `state_diff_failed_count`, `expected_actions_evaluated_count`, `expected_actions_matched_count`, `expected_actions_failed_count`, `policy_violation_count`, `tool_semantic_error_count`, and `evaluator_error_types`.
+Tau-retail evaluator-alignment runs additionally report `evaluation_modes`, `state_diff_evaluated_count`, `state_diff_passed_count`, `state_diff_failed_count`, `expected_actions_evaluated_count`, `expected_actions_matched_count`, `expected_actions_failed_count`, `communicate_info_evaluated_count`, `communicate_info_passed_count`, `nl_assertion_evaluated_count`, `nl_assertion_passed_count`, `unsupported_official_criteria_count`, `policy_violation_count`, `tool_semantic_error_count`, and `evaluator_error_types`.
 For structured candidate-memory runs it additionally reports utility update counts and lifecycle counts:
 `utility_update_count`, `utility_helpful_count`, `utility_harmful_count`, `candidate_memory_count`, `active_memory_count`, and `quarantined_memory_count`.
 Replay-enabled runs additionally report `replay_result_count`, `replay_leave_one_count`, `replay_helpful_count`, `replay_harmful_count`, `replay_neutral_count`, `replay_utility_update_count`, `online_proxy_utility_update_count`, and `utility_credit_sources`.
@@ -337,18 +345,21 @@ pytest
 
 ## Next Milestone
 
-Phase two round one adds the local state/evaluator alignment harness. The next
-round should use that harness against a real tau-bench retail export before
-opening broader memory-method experiments:
+Phase two round three adds the official tau2 action-replay oracle. The next
+round should keep adapter/evaluator alignment separate from memory-method
+claims:
 
-1. Replace the phase-two local fixture paths with a real tau-retail task/data
-   export, first with `max_tasks=1`, then `max_tasks=3`.
-2. Compare evaluator details against the official tau-bench reward semantics:
-   action sequence, state diff, policy/precondition violation, and final answer.
-3. Fill remaining mutation-tool gaps found by real failures rather than adding
-   wider local smoke fixtures.
-4. Only after no-memory rewards are explainable, run `raw_trace_rag` and then
-   `nt_memevo_gate` on the same real export.
+1. Resolve the official task `2` semantic gap where
+   `get_product_details(product_id=6086499569)` is listed in expected actions
+   but the current official DB snapshot does not contain that product id.
+2. Compare action-replay artifacts against the official tau2 evaluator for
+   `communicate_info`, `nl_assertions`, DB mutations, and tool preconditions.
+3. Add only the retail tool semantics exposed by official failures, especially
+   payment/refund/exchange state details.
+4. After the action-replay/oracle path has explainable rewards, introduce a
+   real LLM actor smoke on `max_tasks=1/3`; keep `nt_memevo_gate`, support
+   verification, and scope refinement out of the main path until no-memory
+   reward is explainable.
 5. Keep the first-stage regression matrix green, especially tiny refinement,
-   unsafe polluted negative transfer, and tau-retail real/export no-memory plus
-   raw-trace-rag.
+   unsafe polluted negative transfer, phase-two state fixture, and official
+   tau2 no-memory/raw-trace/action-replay probes.

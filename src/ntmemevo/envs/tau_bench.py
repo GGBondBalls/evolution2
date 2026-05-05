@@ -5,6 +5,7 @@ import copy
 import importlib
 import json
 import operator
+import re
 from pathlib import Path
 from typing import Any
 
@@ -197,8 +198,17 @@ class TauBenchEnv(AgentEnv):
                 f"Order {self._clean_order_id(order_id)} does not contain item ids: {', '.join(missing)}.",
                 ok=False,
             )
-        order["status"] = "return_requested"
+        payment_method_id = str(args.get("payment_method_id") or "")
+        if payment_method_id and not self._payment_method_allowed_for_return(order, payment_method_id):
+            return ToolResult(
+                "return_delivered_order_items",
+                args,
+                f"Payment method {payment_method_id} is not valid for returning order {self._clean_order_id(order_id)}.",
+                ok=False,
+            )
+        order["status"] = "return requested"
         order["return_item_ids"] = item_ids
+        order["return_items"] = sorted(item_ids)
         if args.get("payment_method_id"):
             order["return_payment_method_id"] = str(args["payment_method_id"])
         self._mark_order_items(order, item_ids, "return_requested")
@@ -253,12 +263,32 @@ class TauBenchEnv(AgentEnv):
                 f"Products were not found for exchange: {', '.join(missing_products)}.",
                 ok=False,
             )
-        order["status"] = "exchange_requested"
+        mismatch = self._exchange_variant_mismatches(order, item_ids, product_ids)
+        if mismatch:
+            return ToolResult(
+                "exchange_delivered_order_items",
+                args,
+                mismatch,
+                ok=False,
+            )
+        payment_method_id = str(args.get("payment_method_id") or "")
+        if payment_method_id and not self._payment_method_exists(str(order.get("user_id") or ""), payment_method_id):
+            return ToolResult(
+                "exchange_delivered_order_items",
+                args,
+                f"Payment method {payment_method_id} was not found for user {order.get('user_id')}.",
+                ok=False,
+            )
+        diff_price = self._exchange_price_difference(order, item_ids, product_ids)
+        order["status"] = "exchange requested"
         order["exchange_item_ids"] = item_ids
+        order["exchange_items"] = sorted(item_ids)
         order["exchange_product_ids"] = product_ids
         order["exchange_new_item_ids"] = product_ids
-        if args.get("payment_method_id"):
-            order["exchange_payment_method_id"] = str(args["payment_method_id"])
+        order["exchange_new_items"] = sorted(product_ids)
+        if payment_method_id:
+            order["exchange_payment_method_id"] = payment_method_id
+        order["exchange_price_difference"] = diff_price
         self._mark_order_items(order, item_ids, "exchange_requested")
         return ToolResult(
             "exchange_delivered_order_items",
@@ -536,6 +566,14 @@ class TauBenchEnv(AgentEnv):
             metadata["expected_state_diff"] = expected_state_diff
         if "evaluation_criteria" in record:
             metadata["source_format"] = "tau2_official"
+            criteria = record.get("evaluation_criteria")
+            if isinstance(criteria, dict):
+                metadata["communicate_info"] = self._string_list(criteria.get("communicate_info"))
+                metadata["nl_assertions"] = self._string_list(criteria.get("nl_assertions"))
+                metadata["reward_basis"] = self._string_list(criteria.get("reward_basis"))
+        elif "communicate_info" in record or "nl_assertions" in record:
+            metadata["communicate_info"] = self._string_list(record.get("communicate_info"))
+            metadata["nl_assertions"] = self._string_list(record.get("nl_assertions"))
         metadata["benchmark"] = "tau_bench"
         metadata["domain"] = metadata.get("domain", "retail")
         metadata["intent"] = metadata.get("intent") or self._infer_intent(instruction, tool_names)
@@ -621,6 +659,15 @@ class TauBenchEnv(AgentEnv):
             return tuple(str(item) for item in expected)
         return (str(expected),)
 
+    def _string_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [str(item) for item in value if str(item).strip()]
+        return [str(value)]
+
     def _normalize_actions(self, actions: Any) -> list[dict[str, Any]]:
         if not isinstance(actions, list):
             return []
@@ -638,6 +685,8 @@ class TauBenchEnv(AgentEnv):
                 {
                     "name": str(name),
                     "args": dict(args) if isinstance(args, dict) else {},
+                    "action_id": action.get("action_id"),
+                    "info": action.get("info"),
                     "optional_args": list(optional_args) if isinstance(optional_args, list) else [],
                     "ignore_args": list(ignore_args) if isinstance(ignore_args, list) else [],
                 }
@@ -798,13 +847,7 @@ class TauBenchEnv(AgentEnv):
         zip_code = str(args.get("zip") or args.get("zip_code") or args.get("zipcode") or "")
         full_name = str(args.get("name") or "").lower()
         for user_id, user in self.db["users"].items():
-            user_first = str(user.get("first_name") or "").lower()
-            user_last = str(user.get("last_name") or "").lower()
-            user_name = str(user.get("name") or f"{user_first} {user_last}").lower()
-            if (not user_first or not user_last) and user_name:
-                name_parts = user_name.split()
-                user_first = user_first or (name_parts[0] if name_parts else "")
-                user_last = user_last or (name_parts[-1] if len(name_parts) > 1 else "")
+            user_first, user_last, user_name = self._user_name_parts(user)
             user_zip = self._user_zip(user)
             name_match = (
                 (first_name and last_name and first_name == user_first and last_name == user_last)
@@ -1058,6 +1101,104 @@ class TauBenchEnv(AgentEnv):
             if isinstance(item, dict) and str(item.get("item_id") or item.get("id") or "") in wanted:
                 item["status"] = status
 
+    def _payment_method_allowed_for_return(
+        self,
+        order: dict[str, Any],
+        payment_method_id: str,
+    ) -> bool:
+        if not payment_method_id:
+            return True
+        if not self._payment_method_exists(str(order.get("user_id") or ""), payment_method_id):
+            return False
+        payment_history = order.get("payment_history")
+        if isinstance(payment_history, list) and payment_history:
+            first_payment = payment_history[0]
+            if isinstance(first_payment, dict):
+                original = str(first_payment.get("payment_method_id") or "")
+                if payment_method_id == original:
+                    return True
+        return payment_method_id.startswith("gift_card_")
+
+    def _payment_method_exists(self, user_id: str, payment_method_id: str) -> bool:
+        if not payment_method_id:
+            return False
+        user = self.db["users"].get(user_id)
+        if not isinstance(user, dict):
+            return False
+        payment_methods = user.get("payment_methods")
+        if isinstance(payment_methods, dict):
+            return payment_method_id in payment_methods
+        if isinstance(payment_methods, list):
+            return any(
+                isinstance(method, dict)
+                and str(method.get("id") or method.get("payment_method_id") or "") == payment_method_id
+                for method in payment_methods
+            )
+        direct = user.get("payment_method_id")
+        return str(direct or "") == payment_method_id
+
+    def _exchange_variant_mismatches(
+        self,
+        order: dict[str, Any],
+        item_ids: list[str],
+        new_item_ids: list[str],
+    ) -> str | None:
+        if len(item_ids) != len(new_item_ids):
+            return "The number of items to exchange must match the number of replacement items."
+        order_items = [
+            item
+            for item in order.get("items", [])
+            if isinstance(item, dict)
+        ]
+        for old_item_id, new_item_id in zip(item_ids, new_item_ids):
+            old_item = next(
+                (
+                    item
+                    for item in order_items
+                    if str(item.get("item_id") or item.get("id") or "") == old_item_id
+                ),
+                None,
+            )
+            if old_item is None:
+                return f"Item {old_item_id} was not found in order {order.get('order_id')}."
+            old_product_id = str(old_item.get("product_id") or "")
+            variant = self._find_item_variant(new_item_id)
+            if variant is None:
+                return f"Replacement item {new_item_id} was not found."
+            if str(variant.get("product_id") or "") != old_product_id:
+                return (
+                    f"Replacement item {new_item_id} belongs to product "
+                    f"{variant.get('product_id')}, not {old_product_id}."
+                )
+            if variant.get("available") is False:
+                return f"Replacement item {new_item_id} is not available."
+        return None
+
+    def _exchange_price_difference(
+        self,
+        order: dict[str, Any],
+        item_ids: list[str],
+        new_item_ids: list[str],
+    ) -> float:
+        total = 0.0
+        order_items = [
+            item
+            for item in order.get("items", [])
+            if isinstance(item, dict)
+        ]
+        for old_item_id, new_item_id in zip(item_ids, new_item_ids):
+            old_item = next(
+                (
+                    item
+                    for item in order_items
+                    if str(item.get("item_id") or item.get("id") or "") == old_item_id
+                ),
+                {},
+            )
+            variant = self._find_item_variant(new_item_id) or {}
+            total += float(variant.get("price") or 0.0) - float(old_item.get("price") or 0.0)
+        return round(total, 2)
+
     def _find_item_variant(self, item_id: str) -> dict[str, Any] | None:
         item_id = str(item_id or "")
         if not item_id:
@@ -1094,6 +1235,22 @@ class TauBenchEnv(AgentEnv):
                 return self.db["orders"][candidate]
         return None
 
+    def _user_name_parts(self, user: dict[str, Any]) -> tuple[str, str, str]:
+        raw_name = user.get("name")
+        if isinstance(raw_name, dict):
+            first = str(raw_name.get("first_name") or user.get("first_name") or "").lower()
+            last = str(raw_name.get("last_name") or user.get("last_name") or "").lower()
+            full = f"{first} {last}".strip()
+            return first, last, full
+        first = str(user.get("first_name") or "").lower()
+        last = str(user.get("last_name") or "").lower()
+        full = str(raw_name or f"{first} {last}").lower().strip()
+        if (not first or not last) and full:
+            name_parts = full.split()
+            first = first or (name_parts[0] if name_parts else "")
+            last = last or (name_parts[-1] if len(name_parts) > 1 else "")
+        return first, last, full
+
     def _user_zip(self, user: dict[str, Any]) -> str:
         direct = user.get("zip") or user.get("zip_code") or user.get("postal_code")
         if direct is not None:
@@ -1113,6 +1270,19 @@ class TauBenchEnv(AgentEnv):
         state_detail = self._compare_state_diff(expected_state_diff)
         tool_semantic_errors = self._tool_semantic_errors()
         policy_violations = self._policy_violations(tool_semantic_errors)
+        non_policy_tool_errors = self._non_policy_tool_semantic_errors(
+            tool_semantic_errors=tool_semantic_errors,
+            policy_violations=policy_violations,
+        )
+        communicate_detail = self._evaluate_communicate_info(task, final_answer)
+        nl_assertion_detail = self._evaluate_nl_assertions(task, final_answer)
+        unsupported_official_criteria = self._unsupported_official_criteria(
+            task=task,
+            has_expected_actions=bool(expected_actions),
+            has_expected_state_diff=bool(expected_state_diff),
+            communicate_detail=communicate_detail,
+            nl_assertion_detail=nl_assertion_detail,
+        )
 
         answer_success: bool | None = None
         if expected:
@@ -1146,18 +1316,31 @@ class TauBenchEnv(AgentEnv):
                 checks.append(bool(state_detail["passed"]))
             if answer_success is not None:
                 checks.append(bool(answer_success))
+            if communicate_detail["evaluated"]:
+                checks.append(bool(communicate_detail["passed"]))
+            if nl_assertion_detail["evaluated"]:
+                checks.append(bool(nl_assertion_detail["passed"]))
             if not checks:
                 checks.append(
                     bool(final_answer.strip())
                     and "unable to determine" not in final_answer.lower()
                 )
             unexpected_policy_violations = [] if self._expects_policy_violation(task) else policy_violations
-            success = all(checks) and not unexpected_policy_violations
+            success = (
+                all(checks)
+                and not unexpected_policy_violations
+                and not non_policy_tool_errors
+                and not unsupported_official_criteria
+            )
             error_type = self._official_like_error_type(
                 answer_success=answer_success,
                 action_detail=action_detail,
                 state_detail=state_detail,
                 policy_violations=unexpected_policy_violations,
+                tool_semantic_errors=non_policy_tool_errors,
+                communicate_detail=communicate_detail,
+                nl_assertion_detail=nl_assertion_detail,
+                unsupported_official_criteria=unsupported_official_criteria,
             )
         else:
             success = bool(final_answer.strip()) and "unable to determine" not in final_answer.lower()
@@ -1176,10 +1359,19 @@ class TauBenchEnv(AgentEnv):
             "actual_action_count": len(self._tool_history),
             "action_args_compared": self.compare_action_args,
             "action_mismatches": action_detail["mismatches"],
+            "expected_actual_action_alignment": action_detail["alignment"],
             "state_diff_passed": state_detail["passed"] if expected_state_diff else None,
             "state_diff_expected": expected_state_diff or None,
             "state_diff_mismatches": state_detail["mismatches"],
             "state_diff_summary": self._state_diff_summary(),
+            "communicate_info_expected": communicate_detail["expected"],
+            "communicate_info_passed": communicate_detail["passed"],
+            "communicate_info_mismatches": communicate_detail["mismatches"],
+            "nl_assertions_expected": nl_assertion_detail["expected"],
+            "nl_assertions_passed": nl_assertion_detail["passed"],
+            "nl_assertion_mismatches": nl_assertion_detail["mismatches"],
+            "unsupported_official_criteria": unsupported_official_criteria,
+            "unsupported_official_criteria_count": len(unsupported_official_criteria),
             "policy_violation_count": len(policy_violations),
             "policy_violations": policy_violations,
             "tool_semantic_error_count": len(tool_semantic_errors),
@@ -1228,21 +1420,220 @@ class TauBenchEnv(AgentEnv):
             or task.metadata.get("allow_policy_violation")
         )
 
+    def _non_policy_tool_semantic_errors(
+        self,
+        tool_semantic_errors: list[dict[str, Any]],
+        policy_violations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        policy_keys = {
+            (
+                str(record.get("tool_name") or ""),
+                json.dumps(record.get("args", {}), sort_keys=True),
+                str(record.get("observation") or ""),
+            )
+            for record in policy_violations
+        }
+        return [
+            record
+            for record in tool_semantic_errors
+            if (
+                str(record.get("tool_name") or ""),
+                json.dumps(record.get("args", {}), sort_keys=True),
+                str(record.get("observation") or ""),
+            )
+            not in policy_keys
+        ]
+
+    def _evaluate_communicate_info(self, task: Task, final_answer: str) -> dict[str, Any]:
+        expected = self._string_list(task.metadata.get("communicate_info"))
+        mismatches = []
+        answer = final_answer.lower()
+        for item in expected:
+            if item.lower() not in answer:
+                mismatches.append(
+                    {
+                        "reason": "missing_communicate_info",
+                        "expected": item,
+                    }
+                )
+        return {
+            "evaluated": bool(expected),
+            "passed": (not mismatches) if expected else None,
+            "expected": expected,
+            "mismatches": mismatches,
+        }
+
+    def _evaluate_nl_assertions(self, task: Task, final_answer: str) -> dict[str, Any]:
+        assertions = self._string_list(task.metadata.get("nl_assertions"))
+        mismatches = []
+        unsupported = []
+        normalized_answer = self._normalize_assertion_text(final_answer)
+        communicate_info = self._string_list(task.metadata.get("communicate_info"))
+        for assertion in assertions:
+            required_terms = self._required_terms_from_nl_assertion(
+                assertion=assertion,
+                communicate_info=communicate_info,
+            )
+            if not required_terms:
+                unsupported.append(
+                    {
+                        "reason": "unsupported_nl_assertion_shape",
+                        "assertion": assertion,
+                    }
+                )
+                continue
+            missing_terms = [
+                term
+                for term in required_terms
+                if self._normalize_assertion_text(term) not in normalized_answer
+            ]
+            if missing_terms:
+                mismatches.append(
+                    {
+                        "reason": "nl_assertion_missing_terms",
+                        "assertion": assertion,
+                        "missing_terms": missing_terms,
+                    }
+                )
+        evaluated = bool(assertions) and not unsupported
+        return {
+            "evaluated": evaluated,
+            "passed": (not mismatches) if evaluated else None,
+            "expected": assertions,
+            "mismatches": mismatches,
+            "unsupported": unsupported,
+        }
+
+    def _required_terms_from_nl_assertion(
+        self,
+        assertion: str,
+        communicate_info: list[str],
+    ) -> list[str]:
+        terms: list[str] = []
+        terms.extend(re.findall(r"\b\d+(?:\.\d+)?\b", assertion))
+        terms.extend(re.findall(r"\b\d+(?:\.\d+)?\b", " ".join(communicate_info)))
+        available_match = re.search(
+            r"there\s+(?:are|is)\s+\d+(?:\.\d+)?\s+(.+?)\s+available",
+            assertion,
+            flags=re.IGNORECASE,
+        )
+        if available_match:
+            subject = available_match.group(1).strip()
+            subject = re.sub(r"\b(options?|items?|products?)\b", "", subject, flags=re.IGNORECASE)
+            subject = " ".join(subject.split())
+            if subject:
+                terms.append(subject)
+        quoted_terms = re.findall(r"['\"]([^'\"]+)['\"]", assertion)
+        terms.extend(quoted_terms)
+        deduped = []
+        for term in terms:
+            normalized = self._normalize_assertion_text(term)
+            if normalized and normalized not in {self._normalize_assertion_text(item) for item in deduped}:
+                deduped.append(term)
+        return deduped
+
+    def _normalize_assertion_text(self, text: str) -> str:
+        normalized = text.lower().replace("-", "")
+        normalized = re.sub(r"[^a-z0-9.]+", " ", normalized)
+        return " ".join(normalized.split())
+
+    def _unsupported_official_criteria(
+        self,
+        task: Task,
+        has_expected_actions: bool,
+        has_expected_state_diff: bool,
+        communicate_detail: dict[str, Any],
+        nl_assertion_detail: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        criteria = task.metadata.get("evaluation_criteria")
+        if not isinstance(criteria, dict):
+            return []
+        unsupported: list[dict[str, Any]] = []
+        supported_keys = {
+            "actions",
+            "communicate_info",
+            "nl_assertions",
+            "reward_basis",
+            "expected_state_diff",
+            "state_diff",
+            "expected_db_state",
+        }
+        for key, value in criteria.items():
+            if key in supported_keys or value in (None, [], {}, ""):
+                continue
+            unsupported.append(
+                {
+                    "reason": "unsupported_criterion_key",
+                    "criterion": key,
+                }
+            )
+
+        for item in nl_assertion_detail.get("unsupported", []):
+            unsupported.append(dict(item))
+
+        reward_basis = self._string_list(criteria.get("reward_basis"))
+        for basis in reward_basis:
+            normalized_basis = basis.upper()
+            if normalized_basis == "DB":
+                if not has_expected_actions and not has_expected_state_diff:
+                    unsupported.append(
+                        {
+                            "reason": "db_reward_without_actions_or_state_diff",
+                            "criterion": "reward_basis",
+                            "value": basis,
+                        }
+                    )
+            elif normalized_basis == "NL_ASSERTION":
+                has_nl_signal = (
+                    communicate_detail["evaluated"]
+                    or nl_assertion_detail["evaluated"]
+                    or not self._string_list(criteria.get("nl_assertions"))
+                )
+                if not has_nl_signal:
+                    unsupported.append(
+                        {
+                            "reason": "nl_assertion_reward_without_supported_assertion",
+                            "criterion": "reward_basis",
+                            "value": basis,
+                        }
+                    )
+            else:
+                unsupported.append(
+                    {
+                        "reason": "unsupported_reward_basis",
+                        "criterion": "reward_basis",
+                        "value": basis,
+                    }
+                )
+        return unsupported
+
     def _official_like_error_type(
         self,
         answer_success: bool | None,
         action_detail: dict[str, Any],
         state_detail: dict[str, Any],
         policy_violations: list[dict[str, Any]],
+        tool_semantic_errors: list[dict[str, Any]],
+        communicate_detail: dict[str, Any],
+        nl_assertion_detail: dict[str, Any],
+        unsupported_official_criteria: list[dict[str, Any]],
     ) -> str | None:
         if policy_violations:
             return "policy_violation"
+        if tool_semantic_errors:
+            return "tool_semantic_error"
         if action_detail["evaluated"] and not action_detail["passed"]:
             return self._action_error_type(action_detail)
         if state_detail["evaluated"] and not state_detail["passed"]:
             return "state_diff_mismatch"
         if answer_success is False:
             return "expected_answer_mismatch"
+        if communicate_detail["evaluated"] and not communicate_detail["passed"]:
+            return "communicate_info_mismatch"
+        if nl_assertion_detail["evaluated"] and not nl_assertion_detail["passed"]:
+            return "natural_language_assertion_mismatch"
+        if unsupported_official_criteria:
+            return "unsupported_official_criterion"
         return None
 
     def _action_error_type(self, action_detail: dict[str, Any]) -> str:
@@ -1257,8 +1648,14 @@ class TauBenchEnv(AgentEnv):
 
     def _compare_actions(self, expected_actions: list[dict[str, Any]]) -> dict[str, Any]:
         mismatches: list[dict[str, Any]] = []
+        alignment: list[dict[str, Any]] = []
         if not expected_actions:
-            return {"evaluated": False, "passed": None, "mismatches": mismatches}
+            return {
+                "evaluated": False,
+                "passed": None,
+                "mismatches": mismatches,
+                "alignment": alignment,
+            }
         if len(expected_actions) != len(self._tool_history):
             mismatches.append(
                 {
@@ -1269,6 +1666,15 @@ class TauBenchEnv(AgentEnv):
             )
         for index, expected in enumerate(expected_actions):
             actual = self._tool_history[index] if index < len(self._tool_history) else None
+            alignment_record = {
+                "index": index,
+                "expected_action_id": expected.get("action_id"),
+                "expected_tool_name": expected.get("name"),
+                "expected_args": expected.get("args", {}),
+                "actual_tool_name": actual.get("tool_name") if actual else None,
+                "actual_args": actual.get("args", {}) if actual else None,
+                "actual_ok": actual.get("ok") if actual else None,
+            }
             if actual is None:
                 mismatches.append(
                     {
@@ -1277,7 +1683,11 @@ class TauBenchEnv(AgentEnv):
                         "expected_tool_name": expected.get("name"),
                     }
                 )
+                alignment_record["matched"] = False
+                alignment_record["mismatch_reasons"] = ["missing_actual_action"]
+                alignment.append(alignment_record)
                 continue
+            action_mismatch_reasons = []
             if expected.get("name") != actual.get("tool_name"):
                 mismatches.append(
                     {
@@ -1287,9 +1697,22 @@ class TauBenchEnv(AgentEnv):
                         "actual_tool_name": actual.get("tool_name"),
                     }
                 )
+                action_mismatch_reasons.append("tool_name_mismatch")
             if self.compare_action_args:
-                mismatches.extend(self._compare_action_args(index, expected, actual))
-        return {"evaluated": True, "passed": not mismatches, "mismatches": mismatches}
+                arg_mismatches = self._compare_action_args(index, expected, actual)
+                mismatches.extend(arg_mismatches)
+                action_mismatch_reasons.extend(
+                    str(mismatch.get("reason")) for mismatch in arg_mismatches
+                )
+            alignment_record["matched"] = not action_mismatch_reasons
+            alignment_record["mismatch_reasons"] = action_mismatch_reasons
+            alignment.append(alignment_record)
+        return {
+            "evaluated": True,
+            "passed": not mismatches,
+            "mismatches": mismatches,
+            "alignment": alignment,
+        }
 
     def _compare_action_args(
         self,

@@ -422,10 +422,14 @@ def test_tau2_official_nested_task_format_loads_and_filters(tmp_path: Path) -> N
         {
             "name": "get_order_details",
             "args": {"order_id": "#READ1001"},
+            "action_id": "0_0",
+            "info": None,
             "optional_args": [],
             "ignore_args": [],
         }
     ]
+    assert tasks[0].metadata["communicate_info"] == []
+    assert tasks[0].metadata["nl_assertions"] == []
 
 
 def test_tau2_official_nested_task_config_runs_with_official_like_evaluator(tmp_path: Path) -> None:
@@ -511,6 +515,180 @@ logging:
     run_record = json.loads((output_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert run_record["evaluation_details"]["expected_actions_matched"] is True
     assert run_record["evaluation_details"]["action_args_compared"] is True
+
+
+def test_tau2_action_replay_agent_executes_expected_actions_and_nl_checks(tmp_path: Path) -> None:
+    tasks_path = tmp_path / "official_action_replay_tasks.json"
+    split_path = tmp_path / "official_action_replay_splits.json"
+    tasks_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "0",
+                    "user_scenario": {
+                        "instructions": {
+                            "task_instructions": "Be concise.",
+                            "domain": "retail",
+                            "reason_for_call": "Look up the details for order #READ1001 and report the count.",
+                            "known_info": "You are Mira Chen.",
+                            "unknown_info": "",
+                        }
+                    },
+                    "evaluation_criteria": {
+                        "actions": [
+                            {
+                                "action_id": "0_0",
+                                "name": "get_order_details",
+                                "arguments": {"order_id": "#READ1001"},
+                            }
+                        ],
+                        "communicate_info": ["10"],
+                        "nl_assertions": [
+                            "Agent should tell the user that there are 10 t-shirt options available."
+                        ],
+                        "reward_basis": ["DB", "NL_ASSERTION"],
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    split_path.write_text(json.dumps({"base": ["0"]}), encoding="utf-8")
+
+    output_dir = tmp_path / "runs" / "official_action_replay"
+    config_path = tmp_path / "official_action_replay.yaml"
+    config_path.write_text(
+        f"""
+experiment:
+  name: official_action_replay_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: {tasks_path.as_posix()}
+  task_split_file: {split_path.as_posix()}
+  task_split: base
+  data_dir: data/tau_bench/retail_phase2_state
+  evaluation: official_like
+  compare_action_args: true
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 1
+agent:
+  type: action_replay_agent
+  max_steps: 4
+  memory_top_k: 0
+models:
+  actor:
+    provider: action_replay
+    model: scripted-expected-actions
+    temperature: 0.0
+    max_tokens: 0
+logging:
+  save_raw_model_io: false
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["num_tasks"] == 1
+    assert metrics["success_rate"] == 1.0
+    assert metrics["expected_actions_matched_count"] == 1
+    assert metrics["communicate_info_passed_count"] == 1
+    assert metrics["nl_assertion_passed_count"] == 1
+    assert metrics["unsupported_official_criteria_count"] == 0
+
+    run_record = json.loads((output_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    trace_records = [
+        json.loads(line)
+        for line in (output_dir / "trace_events.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert run_record["agent"] == "action_replay_agent"
+    assert run_record["tool_calls"] == 1
+    assert "10" in run_record["final_answer"]
+    assert run_record["evaluation_details"]["expected_actual_action_alignment"][0]["matched"] is True
+    assert any(record["event_type"] == "scripted_action" for record in trace_records)
+
+
+def test_tau2_official_like_reports_unsupported_criteria(tmp_path: Path) -> None:
+    tasks_path = tmp_path / "official_unsupported_tasks.json"
+    tasks_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "0",
+                    "user_scenario": {
+                        "instructions": {
+                            "reason_for_call": "Look up the details for order #READ1001.",
+                            "known_info": "You are Mira Chen.",
+                        }
+                    },
+                    "evaluation_criteria": {
+                        "actions": [
+                            {
+                                "name": "get_order_details",
+                                "arguments": {"order_id": "#READ1001"},
+                            }
+                        ],
+                        "external_judge": {"kind": "not_supported_locally"},
+                        "reward_basis": ["CUSTOM_JUDGE"],
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "runs" / "official_unsupported"
+    config_path = tmp_path / "official_unsupported.yaml"
+    config_path.write_text(
+        f"""
+experiment:
+  name: official_unsupported_test
+  seed: 1
+  output_dir: {output_dir.as_posix()}
+benchmark:
+  name: tau_bench
+  domain: retail
+  split_file: {tasks_path.as_posix()}
+  data_dir: data/tau_bench/retail_phase2_state
+  evaluation: official_like
+  compare_action_args: true
+  require_data: true
+  validate_export_schema: true
+  max_tasks: 1
+agent:
+  type: action_replay_agent
+  max_steps: 4
+  memory_top_k: 0
+models:
+  actor:
+    provider: action_replay
+    model: scripted-expected-actions
+    temperature: 0.0
+    max_tokens: 0
+logging:
+  save_raw_model_io: false
+  save_trace_events: true
+  save_costs: true
+""",
+        encoding="utf-8",
+    )
+
+    metrics = run(str(config_path))
+
+    assert metrics["success_rate"] == 0.0
+    assert metrics["expected_actions_matched_count"] == 1
+    assert metrics["unsupported_official_criteria_count"] >= 1
+    assert metrics["evaluator_error_types"] == {"unsupported_official_criterion": 1}
+
+    run_record = json.loads((output_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert run_record["error_type"] == "unsupported_official_criterion"
+    assert run_record["evaluation_details"]["unsupported_official_criteria_count"] >= 1
 
 
 def test_tau_retail_real_export_raw_trace_config_path_runs(tmp_path: Path) -> None:
@@ -711,6 +889,148 @@ def test_tau_retail_task_state_resets_between_tasks() -> None:
     reset_result = env.call_tool("get_order_details", {"order_id": "PEND2001"})
     assert reset_result.ok
     assert '"status": "pending"' in reset_result.observation
+
+
+def test_tau_retail_official_exchange_and_return_mutations(tmp_path: Path) -> None:
+    db_path = tmp_path / "official_mutation_db.json"
+    task_path = tmp_path / "tasks.json"
+    db_path.write_text(
+        json.dumps(
+            {
+                "users": {
+                    "user_1": {
+                        "user_id": "user_1",
+                        "name": {"first_name": "Yusuf", "last_name": "Rossi"},
+                        "address": {"zip": "19122"},
+                        "payment_methods": {
+                            "credit_card_1": {
+                                "id": "credit_card_1",
+                                "source": "credit_card",
+                            }
+                        },
+                    }
+                },
+                "orders": {
+                    "#EX1": {
+                        "order_id": "#EX1",
+                        "user_id": "user_1",
+                        "status": "delivered",
+                        "items": [
+                            {
+                                "item_id": "old_item",
+                                "product_id": "product_1",
+                                "price": 10.0,
+                            }
+                        ],
+                        "payment_history": [
+                            {
+                                "transaction_type": "payment",
+                                "amount": 10.0,
+                                "payment_method_id": "credit_card_1",
+                            }
+                        ],
+                    },
+                    "#RET1": {
+                        "order_id": "#RET1",
+                        "user_id": "user_1",
+                        "status": "delivered",
+                        "items": [
+                            {
+                                "item_id": "return_item",
+                                "product_id": "product_1",
+                                "price": 10.0,
+                            }
+                        ],
+                        "payment_history": [
+                            {
+                                "transaction_type": "payment",
+                                "amount": 10.0,
+                                "payment_method_id": "credit_card_1",
+                            }
+                        ],
+                    },
+                },
+                "products": {
+                    "product_1": {
+                        "product_id": "product_1",
+                        "name": "Mechanical Keyboard",
+                        "variants": {
+                            "old_item": {
+                                "item_id": "old_item",
+                                "available": True,
+                                "price": 10.0,
+                            },
+                            "new_item": {
+                                "item_id": "new_item",
+                                "available": True,
+                                "price": 12.5,
+                            },
+                            "return_item": {
+                                "item_id": "return_item",
+                                "available": True,
+                                "price": 10.0,
+                            },
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    task_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "mutation_fixture",
+                    "instruction": "Mutation fixture.",
+                    "expected_answer_contains": ["done"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = TauBenchEnv(
+        {
+            "name": "tau_bench",
+            "domain": "retail",
+            "split_file": str(task_path),
+            "data_file": str(db_path),
+            "evaluation": "answer_contains",
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+
+    find_user = env.call_tool(
+        "find_user_id_by_name_zip",
+        {"first_name": "Yusuf", "last_name": "Rossi", "zip": "19122"},
+    )
+    exchange = env.call_tool(
+        "exchange_delivered_order_items",
+        {
+            "order_id": "#EX1",
+            "item_ids": ["old_item"],
+            "new_item_ids": ["new_item"],
+            "payment_method_id": "credit_card_1",
+        },
+    )
+    returned = env.call_tool(
+        "return_delivered_order_items",
+        {
+            "order_id": "#RET1",
+            "item_ids": ["return_item"],
+            "payment_method_id": "credit_card_1",
+        },
+    )
+
+    assert find_user.ok
+    assert "user_id=user_1" in find_user.observation
+    assert exchange.ok
+    assert env._get_order_record("#EX1")["status"] == "exchange requested"
+    assert env._get_order_record("#EX1")["exchange_price_difference"] == 2.5
+    assert returned.ok
+    assert env._get_order_record("#RET1")["status"] == "return requested"
+    assert env._get_order_record("#RET1")["return_items"] == ["return_item"]
 
 
 def test_tau_retail_phase2_state_config_logs_evaluator_details(tmp_path: Path) -> None:

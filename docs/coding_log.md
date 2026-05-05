@@ -1489,3 +1489,84 @@ grep '"event_type": "retrieve"' runs/tau_retail_phase2_official_tau2_raw_trace_r
 3. `tau_retail_phase2_official_tau2_nomem.yaml` 与 `tau_retail_phase2_official_tau2_raw_trace_rag.yaml` 继续稳定生成 action mismatch 与 memory 日志，`negative_transfer_rate=0.0`。
 4. 新增 action-replay/oracle 配置至少能完整执行官方前 3 条任务的 expected action sequence；若 reward 仍失败，失败必须落到 state diff、natural-language assertion、unsupported criterion 或 tool semantic mismatch。
 5. 官方 tau2 artifacts 中每个失败任务都能在 `evaluation_details` 中解释“是 actor 少做/错做动作，还是工具语义/evaluator 尚未对齐”。
+
+## 2026-05-05 第二阶段第三轮
+
+目标：实现官方 tau2 action-replay oracle / scripted expected-action actor，并补齐官方前 3 条 retail 任务所需的最小 tool/evaluator 语义，使官方多步任务失败不再被 mock actor 能力阻塞，而能归因到工具语义、自然语言断言或 unsupported criterion。
+
+已完成：
+
+1. 新增 `src/ntmemevo/agents/action_replay_agent.py`，实现 `ActionReplayAgent`，按 `Task.metadata.expected_actions` 顺序执行官方工具调用，并记录 `scripted_action` 与 `tool_call` trace 事件。
+2. 修改 `run_stream`，支持 `agent.type=action_replay_agent` / `action_replay` / `scripted_expected_actions`；该路径不创建 LLM client，prompt/completion token 成本为 0，用于 adapter/evaluator oracle 对齐。
+3. 修改 `RunLogger.log_run()`，将 `runs.jsonl.agent` 从硬编码 `react_tool_agent` 改为按实际 agent 类型记录。
+4. 扩展 tau2 official task loader：保留 `evaluation_criteria.actions` 的 `action_id` / `info`，并把 `communicate_info`、`nl_assertions`、`reward_basis` 写入 task metadata。
+5. 修正 official DB 用户姓名解析，支持 tau2 `user.name={first_name,last_name}` 结构，使 `find_user_id_by_name_zip` 可在官方 DB 上找到 Yusuf Rossi。
+6. 补齐官方 exchange / return mutation 的关键字段：`status="exchange requested"` / `status="return requested"`、`exchange_items`、`exchange_new_items`、`exchange_payment_method_id`、`exchange_price_difference`、`return_items` 和 `return_payment_method_id`；增加 payment method 与 variant/product consistency 检查。
+7. 扩展 `official_like` evaluator：在 action/state/answer 之外开始检查 `communicate_info` 与可确定映射的 `nl_assertions`，并记录 `communicate_info_*`、`nl_assertion_*` 与 `unsupported_official_criteria` 细节。
+8. `runs.jsonl.evaluation_details` 新增 `expected_actual_action_alignment`，逐步保留 expected action id、expected/actual tool name、args、actual ok 与 mismatch reasons。
+9. `metrics.json` 新增 `communicate_info_evaluated_count`、`communicate_info_passed_count`、`communicate_info_failed_count`、`nl_assertion_evaluated_count`、`nl_assertion_passed_count`、`nl_assertion_failed_count` 和 `unsupported_official_criteria_count`。
+10. 新增配置 `configs/tau_retail_phase2_official_tau2_action_replay.yaml`，默认读取官方 tau2 retail base split 前 3 条任务，使用 action replay oracle 与 `official_like` evaluator。
+11. 新增/更新测试：action replay 执行 nested tau2 expected actions、`communicate_info` / `nl_assertions` 通过、unsupported criterion 可解释降级、official exchange/return mutation 状态更新、官方姓名结构解析，以及第二阶段前两轮配置不回归。
+12. 更新 `README.md`，加入 action-replay 命令、第三轮新增 evaluator detail 字段、metrics 字段和下一轮方向。
+
+关键实现说明：
+
+1. `ActionReplayAgent` 不是方法收益实验 actor，不代表真实 LLM 能力；它只用于把 expected action sequence 完整送进环境，从而检查 adapter、tool semantics 和 evaluator。
+2. `official_like` 对 `nl_assertions` 只做确定性可解释映射：当前支持数字与简单 “there are N ... available” 形态；无法确定映射的 assertion 会进入 `unsupported_official_criteria`，不会静默当作通过。
+3. 对 official tau2 前 3 条任务，action replay 已经消除 actor action mismatch；剩余失败来自 task `2` 的 `get_product_details(product_id=6086499569)` 在当前官方 DB 中找不到对应 product，属于明确的 `tool_semantic_error`。
+4. 本轮仍不迁移 `nt_memevo_gate`、support verification、scope refinement 或真实 LLM actor；这些应等 official oracle/evaluator 语义进一步对齐后再进入主线。
+
+验证记录：
+
+1. `PYTHONPATH=src python -m pytest tests/test_tau_bench_adapter.py -q` 通过，结果为 `19 passed in 0.11s`。
+2. `PYTHONPATH=src python -m pytest -q` 通过，结果为 `34 passed in 0.13s`。
+3. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml` 通过：`success_rate=0.6666666666666666`、`expected_actions_matched_count=3`、`state_diff_passed_count=1`、`policy_violation_count=1`。
+4. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml` 通过：`success_rate=0.6666666666666666`、`memory_policy=raw_trace_rag`、`memory_size=3`、`policy_violation_count=1`。
+5. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml` 通过：`success_rate=0.0`、`expected_actions_matched_count=0`、`expected_actions_failed_count=3`、`negative_transfer_rate=0.0`；新增 `communicate_info_failed_count=1` 和 `nl_assertion_failed_count=1`，说明 mock actor 未表达 task 2 的官方 NL 要求。
+6. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml` 通过：`success_rate=0.0`、`memory_policy=raw_trace_rag`、`memory_size=3`、`expected_actions_failed_count=3`、`negative_transfer_rate=0.0`。
+7. `PYTHONPATH=src python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay.yaml` 通过：`num_tasks=3`、`success_rate=0.6666666666666666`、`avg_tool_calls=7.0`、`avg_prompt_tokens=0.0`、`expected_actions_matched_count=3`、`expected_actions_failed_count=0`、`communicate_info_passed_count=1`、`nl_assertion_passed_count=1`、`tool_semantic_error_count=1`、`evaluator_error_types={"tool_semantic_error": 1}`。
+8. 抽查 `runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl`：task `0` 与 `1` 成功；task `2` 完整执行 11 步 expected actions，`expected_actions_matched=true`，但 `get_product_details({"product_id":"6086499569"})` 返回 `ok=false`，因此 `error_type=tool_semantic_error`。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+# 如果 data/external 下缺少官方仓库，先克隆：
+git clone https://github.com/sierra-research/tau-bench.git data/external/tau-bench
+git clone https://github.com/sierra-research/tau2-bench.git data/external/tau2-bench
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay.yaml
+
+cat runs/tau_retail_phase2_official_tau2_action_replay_seed1/metrics.json
+tail -n 3 runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl
+grep '6086499569' runs/tau_retail_phase2_official_tau2_action_replay_seed1/trace_events.jsonl
+grep '"event_type": "scripted_action"' runs/tau_retail_phase2_official_tau2_action_replay_seed1/trace_events.jsonl
+```
+
+实验日志填写建议：
+
+1. 新增 `tau_retail_phase2_official_tau2_action_replay_seed1` 条目，记录官方 repo commit、官方数据规模、action-replay 配置和本轮 action-replay 指标。
+2. 重点记录 action-replay 与 mock no-memory 的差异：mock 配置 `expected_actions_matched_count=0`，action-replay 配置 `expected_actions_matched_count=3`。
+3. 重点记录 task `2` 的失败原因：actor 已完整执行 expected actions，NL assertion 已通过，剩余失败是 `get_product_details(product_id=6086499569)` 在当前 official DB 中找不到 product，归类为 `tool_semantic_error`。
+4. 本轮结果只用于 adapter/evaluator 对齐，不用于报告 NT-MemEvo 方法收益。
+
+当前边界：
+
+1. `official_like` 仍不是官方 tau2 evaluator，只是本地可解释近似。
+2. `nl_assertions` 仍是确定性启发式映射，不支持需要复杂语义判断的自然语言断言。
+3. 官方 task `2` 的 `6086499569` product semantic gap 需要下一轮继续对齐官方 evaluator/DB/tool 版本或记录为官方数据兼容 blocker。
+4. 真实 LLM actor、多轮 user simulator、官方 reward、`nt_memevo_gate`、support verification 和 scope refinement 仍未迁移到官方 tau2 主实验。
+
+下一步建议：
+
+1. 追踪 `6086499569` 在当前 tau2 官方 DB 中缺失的原因：确认是 task/data 版本错配、官方 evaluator 对该 action 的特殊处理，还是 adapter 应兼容 item/product id fallback。
+2. 对齐官方 tau2 evaluator 的 `communicate_info`、`nl_assertions` 和 DB reward 规则，优先把 action-replay 的失败从 `tool_semantic_error` 推进到官方一致口径。
+3. 当 action-replay 前 3 条任务全部通过或每个失败都有官方一致解释后，再接真实 LLM actor 的 `max_tasks=1/3` smoke。
+4. 在真实 actor no-memory reward 可解释后，再迁移 `raw_trace_rag` 以外的 NT-MemEvo gate/replay/verification 机制。

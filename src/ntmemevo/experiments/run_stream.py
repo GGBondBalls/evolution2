@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from ntmemevo.agents.action_replay_agent import ActionReplayAgent
 from ntmemevo.agents.react_agent import ReActToolAgent
 from ntmemevo.config import load_config
 from ntmemevo.envs.factory import create_env
@@ -43,13 +44,22 @@ def run(config_path: str) -> dict[str, Any]:
     tasks = env.load_tasks(max_tasks=int(max_tasks) if max_tasks is not None else None)
 
     actor_config = config.models.get("actor", {})
-    llm = create_llm_client(actor_config)
-    agent = ReActToolAgent(
-        llm=llm,
-        model_config=actor_config,
-        max_steps=int(config.agent.get("max_steps", 8)),
-        memory_top_k=int(config.agent.get("memory_top_k", 0)),
-    )
+    agent_type = str(config.agent.get("type", "react_tool_agent")).lower()
+    max_steps = int(config.agent.get("max_steps", 8))
+    if agent_type in {"action_replay", "action_replay_agent", "scripted_expected_actions"}:
+        agent = ActionReplayAgent(max_steps=max_steps)
+        run_agent_label = "action_replay_agent"
+    elif agent_type == "react_tool_agent":
+        llm = create_llm_client(actor_config)
+        agent = ReActToolAgent(
+            llm=llm,
+            model_config=actor_config,
+            max_steps=max_steps,
+            memory_top_k=int(config.agent.get("memory_top_k", 0)),
+        )
+        run_agent_label = "react_tool_agent"
+    else:
+        raise ValueError(f"Unsupported agent.type: {agent_type}")
 
     run_logger = RunLogger(output_dir=config.output_dir, config_path=config.path)
     run_logger.prepare(tasks)
@@ -210,6 +220,7 @@ def run(config_path: str) -> dict[str, Any]:
             iteration=index,
             result=result,
             memory_policy=memory_policy,
+            agent_type=run_agent_label,
         )
         if (
             memory_policy == "nt_memevo_gate"

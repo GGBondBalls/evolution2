@@ -2156,3 +2156,108 @@ grep '"event_type": "retrieve"' runs/tau_retail_phase2_official_tau2_raw_trace_r
 3. 基于 task `2` 的 return/count 场景补多订单读取、商品查询、return tool state update 和 `communicate_info` / `nl_assertions` 映射。
 4. 将 evaluator 从单纯 action sequence 对齐推进到 action + DB state + natural-language assertion 的组合 detail，继续保持 failure reason 可分类。
 5. 等 oracle/scripted actor 能让至少 1-3 条官方任务通过或产生可解释 state mismatch 后，再接真实 LLM actor；`nt_memevo_gate`、support verification 和 scope refinement 暂不作为第三轮主验收。
+
+## tau_retail_phase2_official_tau2_action_replay_seed1
+
+### 实验名称
+
+`tau_retail_phase2_official_tau2_action_replay_seed1`
+
+### 日期与环境
+
+待实验执行者填写。目标环境：Linux，`conda activate rm`，Python 3.12。
+
+### 官方数据来源
+
+沿用第二阶段第二轮官方 tau2 数据：
+
+1. `data/external/tau-bench`
+2. `data/external/tau2-bench`
+3. 官方 tau2 retail 数据路径：`data/external/tau2-bench/data/tau2/domains/retail/`
+
+复验时请记录两个官方仓库的 commit hash：
+
+```bash
+git -C data/external/tau-bench rev-parse HEAD
+git -C data/external/tau2-bench rev-parse HEAD
+```
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev]"
+python -m pytest
+
+# 如果 data/external 下缺少官方仓库，先克隆：
+git clone https://github.com/sierra-research/tau-bench.git data/external/tau-bench
+git clone https://github.com/sierra-research/tau2-bench.git data/external/tau2-bench
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_state_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_raw_trace_rag.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay.yaml
+
+cat runs/tau_retail_phase2_official_tau2_action_replay_seed1/metrics.json
+tail -n 3 runs/tau_retail_phase2_official_tau2_action_replay_seed1/runs.jsonl
+grep '6086499569' runs/tau_retail_phase2_official_tau2_action_replay_seed1/trace_events.jsonl
+grep '"event_type": "scripted_action"' runs/tau_retail_phase2_official_tau2_action_replay_seed1/trace_events.jsonl
+```
+
+### 配置文件
+
+`configs/tau_retail_phase2_official_tau2_action_replay.yaml`
+
+关键参数：
+
+1. `benchmark.split_file=data/external/tau2-bench/data/tau2/domains/retail/tasks.json`
+2. `benchmark.task_split_file=data/external/tau2-bench/data/tau2/domains/retail/split_tasks.json`
+3. `benchmark.task_split=base`
+4. `benchmark.max_tasks=3`
+5. `benchmark.evaluation=official_like`
+6. `benchmark.compare_action_args=true`
+7. `agent.type=action_replay_agent`
+8. `agent.max_steps=16`
+9. `models.actor.provider=action_replay`
+
+### 输出目录
+
+`runs/tau_retail_phase2_official_tau2_action_replay_seed1/`
+
+### 待记录结果
+
+实验执行者完成后填写：
+
+```json
+{
+  "num_tasks": null,
+  "success_rate": null,
+  "avg_tool_calls": null,
+  "expected_actions_matched_count": null,
+  "expected_actions_failed_count": null,
+  "communicate_info_passed_count": null,
+  "nl_assertion_passed_count": null,
+  "tool_semantic_error_count": null,
+  "unsupported_official_criteria_count": null,
+  "evaluator_error_types": null
+}
+```
+
+### 抽查重点
+
+1. `runs.jsonl.agent` 应为 `action_replay_agent`。
+2. task `0` 与 task `1` 应完整执行 5 步 expected actions。
+3. task `2` 应完整执行 11 步 expected actions。
+4. `expected_actions_matched_count` 应显示 action replay 是否消除了第二阶段第二轮的 actor mismatch。
+5. 若 task `2` 仍失败，记录 `evaluation_details.tool_semantic_errors` 是否指向 `get_product_details(product_id=6086499569)`。
+6. `communicate_info_passed_count` 与 `nl_assertion_passed_count` 应说明 task `2` 的自然语言要求是否被 action replay final answer 表达。
+
+### 现象与问题
+
+待实验执行者填写。建议重点区分：
+
+1. actor mismatch 是否已消除。
+2. 剩余失败是否来自 official DB/tool semantic gap。
+3. 是否出现 unsupported official criterion。
+4. 该结果只用于 adapter/evaluator 对齐，不用于报告 NT-MemEvo 方法收益。
