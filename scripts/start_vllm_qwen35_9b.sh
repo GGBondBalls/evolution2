@@ -8,6 +8,7 @@ PORT="${PORT:-8000}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 DTYPE="${DTYPE:-auto}"
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 
 if [[ ! -d "${MODEL_PATH}" ]]; then
   echo "Model path does not exist: ${MODEL_PATH}" >&2
@@ -26,6 +27,7 @@ echo "  model path: ${MODEL_PATH}"
 echo "  served model: ${SERVED_MODEL_NAME}"
 echo "  endpoint: http://${HOST}:${PORT}/v1"
 echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-all visible GPUs}"
+echo "  tensor parallel size: ${TENSOR_PARALLEL_SIZE}"
 
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL_PATH}" \
@@ -34,6 +36,7 @@ python -m vllm.entrypoints.openai.api_server \
   --port "${PORT}" \
   --trust-remote-code \
   --dtype "${DTYPE}" \
+  --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
   --max-model-len "${MAX_MODEL_LEN}" \
   "$@"

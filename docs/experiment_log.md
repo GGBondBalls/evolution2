@@ -2457,7 +2457,7 @@ action-replay 第四轮 `metrics.json` 关键字段：
 4. 真实 actor no-memory 结果稳定前，不迁移 `raw_trace_rag` 以外的 memory 方法；`nt_memevo_gate`、support verification 和 scope refinement 继续暂缓。
 5. 第五轮仍只用于 official adapter/evaluator/actor 对齐，不用于报告 NT-MemEvo 方法收益。
 
-## tau_retail_phase2_official_tau2_real_actor_nomem_seed1 第五轮本地 Qwen/vLLM 真实 actor 待填
+## tau_retail_phase2_official_tau2_real_actor_nomem_seed1 第五轮本地 Qwen/vLLM 真实 actor 复验
 
 ### 实验名称
 
@@ -2465,7 +2465,9 @@ action-replay 第四轮 `metrics.json` 关键字段：
 
 ### 日期与环境
 
-待填写。建议记录 Linux 机器标识、conda 环境 `(rm)`、Python 版本、vLLM 版本、CUDA_VISIBLE_DEVICES、GPU 型号/显存、`PORT`、`MODEL_PATH=/home/fyk/models/Qwen/Qwen3.5-9B`、`SERVED_MODEL_NAME=qwen3.5-9b`、`MAX_MODEL_LEN` 和 `GPU_MEMORY_UTILIZATION`。
+2026-05-05，Linux，机器标识 `BNUZ`，交互式 conda 环境 `(rm)`，Python 3.12.13，pytest 9.0.3，pluggy 1.6.0。
+
+本轮使用本地 vLLM OpenAI-compatible endpoint：`VLLM_BASE_URL=http://127.0.0.1:8000/v1`。用户首次按单卡命令 `CUDA_VISIBLE_DEVICES=0 bash scripts/start_vllm_qwen35_9b.sh` 启动时出现 24G 单卡 OOM；随后启动脚本已补充 `TENSOR_PARALLEL_SIZE` 支持，建议双卡 24G 使用 `CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.85/0.90 MAX_MODEL_LEN=4096` 启动。真实 actor run 已成功连通本地 vLLM 服务并完成 `max_tasks=1`。
 
 ### 运行命令
 
@@ -2475,6 +2477,10 @@ pip install -e ".[dev,vllm]"
 
 # 终端 1：启动本地模型服务
 CUDA_VISIBLE_DEVICES=0 bash scripts/start_vllm_qwen35_9b.sh
+
+# 若单卡 24G 显存不足，双卡启动：
+CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.90 MAX_MODEL_LEN=4096 \
+  bash scripts/start_vllm_qwen35_9b.sh
 
 # 终端 2：健康检查与实验
 curl http://127.0.0.1:8000/v1/models
@@ -2501,27 +2507,41 @@ grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_real_actor
 
 ### 结果
 
-待填写。建议至少记录：
+`python -m pytest` 结果：
+
+```text
+37 passed in 0.12s
+```
+
+`tau_retail_phase2_official_tau2_real_actor_nomem_seed1/metrics.json`：
 
 ```json
 {
-  "num_tasks": null,
-  "success_rate": null,
-  "avg_reward": null,
-  "avg_steps": null,
-  "avg_prompt_tokens": null,
-  "avg_completion_tokens": null,
-  "avg_tool_calls": null,
-  "expected_actions_matched_count": null,
-  "expected_actions_failed_count": null,
-  "communicate_info_passed_count": null,
-  "nl_assertion_passed_count": null,
-  "tool_observation_error_count": null,
-  "expected_negative_observation_count": null,
-  "policy_violation_count": null,
-  "tool_semantic_error_count": null,
-  "unsupported_official_criteria_count": null,
-  "evaluator_error_types": null,
+  "num_tasks": 1,
+  "success_rate": 0.0,
+  "avg_reward": 0.0,
+  "avg_steps": 2.0,
+  "avg_prompt_tokens": 1177.0,
+  "avg_completion_tokens": 127.0,
+  "avg_tool_calls": 1.0,
+  "evaluation_modes": {
+    "official_like": 1
+  },
+  "expected_actions_evaluated_count": 1,
+  "expected_actions_matched_count": 0,
+  "expected_actions_failed_count": 1,
+  "communicate_info_evaluated_count": 0,
+  "communicate_info_passed_count": 0,
+  "nl_assertion_evaluated_count": 0,
+  "nl_assertion_passed_count": 0,
+  "tool_observation_error_count": 0,
+  "expected_negative_observation_count": 0,
+  "policy_violation_count": 0,
+  "tool_semantic_error_count": 0,
+  "unsupported_official_criteria_count": 0,
+  "evaluator_error_types": {
+    "unsupported_action": 1
+  },
   "memory_policy": "none",
   "negative_transfer_rate": 0.0
 }
@@ -2529,20 +2549,38 @@ grep '"event_type": "tool_call"' runs/tau_retail_phase2_official_tau2_real_actor
 
 ### 抽查结果
 
-待填写。建议逐条记录：
-
-1. 是否出现 `model_parse_error`，若出现，保存原始响应前 500 字符并判断是否是 Qwen thinking、Markdown fence 或非 JSON 文本导致。
-2. 每条任务的 `error_type`、`expected_actions_matched`、`actual_action_count` 和 `action_mismatches`。
-3. `evaluation_details` 中 ACTION、DB/state、COMMUNICATE、NL_ASSERTION、unsupported criterion 和 tool observation taxonomy 的通过/失败。
-4. 若工具调用失败，区分 `expected_negative_observation`、`policy_violation` 和真正 `tool_semantic_error`。
+1. 本地 Qwen/vLLM actor 成功完成第一步官方 expected action：`find_user_id_by_name_zip({"first_name":"Yusuf","last_name":"Rossi","zip":"19122"})`，tool observation 为 `user_id=yusuf_rossi_9620; name=Yusuf Rossi; zip=19122`，`ok=true`。
+2. 第二步 `model_decision` 的 `thought_summary` 明确表示模型知道下一步应查询 `get_order_details`：`I need to find the order details for order #W2378156...`，但解析后的 `action` 为空字符串、`tool_name=null`，因此 agent 返回 `Unsupported action: `，`error_type=unsupported_action`。
+3. 本轮没有出现 `model_parse_error`；说明 vLLM client 的 Qwen thinking 清理和 JSON 抽取路径至少在该样例上没有触发 JSON 解析失败。
+4. `evaluation_details.expected_actions_matched=false`，原因是 `actual_action_count=1`，而官方 expected action count 为 5；第一步 alignment matched，后四步分别缺失 `get_order_details`、两次 `get_product_details` 和 `exchange_delivered_order_items`。
+5. 本轮没有工具 observation 失败：`tool_observation_error_count=0`、`expected_negative_observation_count=0`、`policy_violation_count=0`、`tool_semantic_error_count=0`。
+6. 本轮没有 official criterion 覆盖缺口：`unsupported_official_criteria_count=0`。失败完全落在真实 actor 输出协议/动作序列能力，不是 adapter/tool/evaluator 语义问题，也不是 memory 负迁移。
 
 ### 现象与问题
 
-待填写。当前预期：本实验只验证本地 Qwen/vLLM actor 的 no-memory 可解释失败类型，不报告 NT-MemEvo 方法收益。
+第五轮真实 actor smoke 的核心结论是：本地 `/home/fyk/models/Qwen/Qwen3.5-9B` + vLLM OpenAI-compatible 调用链路已经可用，项目能从真实本地模型获得 tool-use 决策、调用 retail tool，并把 official-like evaluator taxonomy 写入 `runs.jsonl` 与 `metrics.json`。
+
+当前失败不是工具语义失败：第一步工具调用与 expected action 完全匹配，且没有 tool observation error。失败也不是 JSON parse failure：agent 成功解析出一个 JSON 对象，但第二步对象没有给出协议要求的 `action="tool"` 或 `action="final"`。因此下一轮的优先问题应是 **真实 actor 输出协议加固**，包括：
+
+1. 在 `trace_events.jsonl` 中记录成功解析但动作不合法时的 raw model response，避免只能看到 `action=""` 而看不到原始字段。
+2. 在 prompt 中更强约束每轮必须返回 `{"action":"tool","tool_name":"...","args":{...}}` 或 `{"action":"final","answer":"..."}`。
+3. 在 ReAct agent 中审慎支持常见兼容字段或 repair，例如模型输出 `tool` / `tool_name` / `arguments` 但漏写 `action` 时，按可审计规则修复为 tool action，并记录 `model_action_repair` 事件。
+4. 修复后再运行 `max_tasks=1`；只有该样例可以完成多步工具链或至少失败更深层时，才扩到 `max_tasks=3`。
+
+本实验仍只用于 official adapter/evaluator/actor 对齐，不报告 NT-MemEvo 方法收益。
 
 ### 下一步
 
-待填写。若 `max_tasks=1` 失败可解释，下一步可把配置中的 `benchmark.max_tasks` 改为 `3` 继续复验；若真实 actor failure taxonomy 稳定，再新增 raw-trace-rag 真实 actor 小样本配置。
+当前不建议直接扩大到 `max_tasks=3`，因为 `max_tasks=1` 已经暴露真实 actor 输出协议问题。下一轮应先编码修复 raw model response 日志与 action repair，再复验：
+
+```bash
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/metrics.json
+tail -n 1 runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/runs.jsonl
+grep '"model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl || true
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/trace_events.jsonl || true
+```
 
 ## tau_retail_phase2_official_tau2_action_replay_scan10_seed1 第五轮 compatibility scan 待填
 

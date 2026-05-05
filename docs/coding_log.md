@@ -1759,7 +1759,7 @@ grep '"tool_semantic_errors": \[\]' runs/tau_retail_phase2_official_tau2_action_
 2. `create_llm_client()` 新增 `provider=vllm` / `provider=local_vllm` / `provider=openai_compatible`，支持 `base_url_env`、`base_url`、`api_key`、`api_key_env`、`timeout_seconds`、`request_retries`、`retry_sleep_seconds`、`healthcheck`、`disable_response_format`、`strip_thinking`、`extract_json_object` 和 `extra_body`。
 3. vLLM client 默认访问 `/v1/models` 做健康检查；如果服务未启动，会给出明确提示：先运行 `bash scripts/start_vllm_qwen35_9b.sh`，或在干跑配置时设置 `healthcheck=false`。
 4. 针对本地 Qwen 可能输出 `<think>...</think>`、Markdown code fence 或 JSON 外文本的情况，client 支持在 `response_format={"type":"json_object"}` 时抽取首个 JSON object，降低真实 actor 因格式噪声直接 `invalid_json_response` 的概率。
-5. 新增 `scripts/start_vllm_qwen35_9b.sh`，默认以 `served_model_name=qwen3.5-9b` 启动 `/home/fyk/models/Qwen/Qwen3.5-9B`，监听 `127.0.0.1:8000`，并支持 `CUDA_VISIBLE_DEVICES`、`PORT`、`GPU_MEMORY_UTILIZATION`、`MAX_MODEL_LEN`、`DTYPE` 等调度参数。
+5. 新增 `scripts/start_vllm_qwen35_9b.sh`，默认以 `served_model_name=qwen3.5-9b` 启动 `/home/fyk/models/Qwen/Qwen3.5-9B`，监听 `127.0.0.1:8000`，并支持 `CUDA_VISIBLE_DEVICES`、`PORT`、`GPU_MEMORY_UTILIZATION`、`MAX_MODEL_LEN`、`DTYPE`、`TENSOR_PARALLEL_SIZE` 等调度参数。
 6. `pyproject.toml` 新增可选 extra `vllm`，用于目标服务器安装 `pip install -e ".[dev,vllm]"`；实验 client 本身仍不依赖该包，只有服务端启动脚本需要 vLLM。
 7. 新增 `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`，默认运行官方 tau2 retail base split 前 1 条任务，`agent.type=react_tool_agent`，`models.actor.provider=vllm`，`model=qwen3.5-9b`，`base_url_env=VLLM_BASE_URL`，输出到 `runs/tau_retail_phase2_official_tau2_real_actor_nomem_seed1/`。
 8. 新增 `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml`，默认使用 action-replay oracle 扫描官方 base 前 10 条任务，作为真实 actor/GPU 调度不可用时的 reward-basis / observation taxonomy 兼容性报告。
@@ -1823,3 +1823,39 @@ grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_re
 1. 在目标服务器启动 vLLM 后，先运行 `tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的 `max_tasks=1` smoke，检查是否存在 JSON 格式噪声、工具调用循环或 action mismatch。
 2. 若 `max_tasks=1` 可解释，再扩到 `max_tasks=3`，并与第四轮 action-replay 前 3 条的 taxonomy 对齐。
 3. 真实 no-memory actor 的 failure taxonomy 稳定后，再新增 `real_actor_raw_trace_rag` 小样本配置；`nt_memevo_gate`、support verification 和 scope refinement 继续暂缓。
+
+用户正式复验记录（本地 Qwen/vLLM real actor）：
+
+1. 用户在 Linux 机器 `BNUZ`、交互式 conda 环境 `(rm)` 下设置 `VLLM_BASE_URL=http://127.0.0.1:8000/v1`，运行 `python -m pytest`，结果为 `37 passed in 0.12s`。
+2. 用户运行 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml`，真实 actor no-memory smoke 完成 `max_tasks=1`。
+3. 真实 actor 指标：`num_tasks=1`、`success_rate=0.0`、`avg_reward=0.0`、`avg_steps=2.0`、`avg_prompt_tokens=1177.0`、`avg_completion_tokens=127.0`、`avg_tool_calls=1.0`、`expected_actions_matched_count=0`、`expected_actions_failed_count=1`、`evaluator_error_types={"unsupported_action": 1}`、`negative_transfer_rate=0.0`。
+4. 抽查 `runs.jsonl`：task `0` 第一轮工具调用 `find_user_id_by_name_zip({"first_name":"Yusuf","last_name":"Rossi","zip":"19122"})` 与 official expected action 第一步匹配，tool observation 为 `user_id=yusuf_rossi_9620; name=Yusuf Rossi; zip=19122`。
+5. 抽查 `trace_events.jsonl`：第二轮 model decision 的 thought 表示模型知道应继续查询 `get_order_details(order #W2378156)`，但解析后 `action=""`、`tool_name=null`，agent 因此返回 `Unsupported action: `。
+6. 本轮没有 `model_parse_error`、没有 tool observation error、没有 expected negative observation、没有 policy violation、没有 tool semantic error，也没有 unsupported official criteria；失败完全落在真实 actor 输出协议/动作序列能力，而不是 adapter/tool/evaluator 语义或 memory 负迁移。
+7. 用户单卡启动 vLLM 时遇到 24G 显存 OOM；脚本已补充 `TENSOR_PARALLEL_SIZE`，推荐双卡命令为 `CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.85 MAX_MODEL_LEN=4096 bash scripts/start_vllm_qwen35_9b.sh`，若仍 OOM 可降到 `MAX_MODEL_LEN=2048`。
+
+第五轮收口判断：
+
+1. 第五轮目标已经完成：本地 Qwen/vLLM 服务链路、真实 actor 配置、official-like evaluator taxonomy 和日志输出均已在目标机器通过最小 `max_tasks=1` smoke。
+2. 当前不应直接扩大到 `max_tasks=3`，因为第一条任务已经暴露真实 actor 输出协议问题；扩大样本只会重复收集 `unsupported_action`，不会推进 adapter/evaluator 对齐。
+3. 本轮仍不报告 NT-MemEvo memory 方法收益；真实 actor no-memory 尚未稳定完成多步工具协议，raw-trace-rag / gate / replay / verification 都应继续暂缓。
+
+## 第二阶段第六轮方向
+
+优先方向：真实 actor 输出协议加固与可审计 raw model response 日志。理由是第五轮已经证明本地 Qwen/vLLM actor 能连通并正确执行第一步工具调用，但第二步出现“模型意图正确、输出协议不合格”的 `unsupported_action`；下一轮应先把真实 actor 的输出格式、修复路径和原始响应诊断稳定下来，再扩大官方 tau2 样本。
+
+第六轮建议范围：
+
+1. 在 `ReActToolAgent` 中为所有 model decision 增加可控 raw response 日志，尤其是成功 JSON 解析但 `action` 不在 `{tool, final}` 时，记录 `raw_response`、parsed decision、repair status 和 failure reason。
+2. 强化 prompt 协议：明确每轮只能返回一个 JSON object，且必须包含 `action`；调用工具时必须包含 `tool_name` 和 `args`；不得只写 thought 或漏写 action。
+3. 实现保守 action repair：若模型输出包含可识别 `tool_name`/`tool` 和 dict 类型 `args`/`arguments`，但漏写 `action`，可修复为 `action=tool`，并写入 `model_action_repair` trace event；不能修复时继续 `unsupported_action`。
+4. 增加单元测试覆盖：合法 tool action 不变、缺失 action 但含 tool_name 可修复、缺失 action 且无工具名不可修复、raw response 日志按预期写出。
+5. 复验 `tau_retail_phase2_official_tau2_real_actor_nomem.yaml` 的 `max_tasks=1`；若不再停在第二步 `unsupported_action`，再考虑扩到 `max_tasks=3`。
+6. 保持 action-replay scan10 和全部 tiny/tau adapter 回归测试不变，确保真实 actor parser 加固不影响 mock/action-replay 路径。
+
+第六轮验收标准：
+
+1. `python -m pytest` 全量通过。
+2. 真实 actor `max_tasks=1` 不再因“漏写 action 但有明确工具意图”直接丢失原始响应；要么被可审计 repair，要么在 trace 中保留 raw response 和不可修复原因。
+3. 若 repair 后 task 0 继续推进到 `get_order_details` 或更深工具链，记录新的 failure taxonomy；若仍失败，必须能从日志看到原始模型输出。
+4. 不扩大到 memory 方法收益实验；第六轮仍只服务于 official real actor 输出协议和 failure taxonomy 稳定。

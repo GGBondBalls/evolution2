@@ -55,6 +55,13 @@ CUDA_VISIBLE_DEVICES=1 PORT=8001 GPU_MEMORY_UTILIZATION=0.80 MAX_MODEL_LEN=8192 
   bash scripts/start_vllm_qwen35_9b.sh
 ```
 
+For a 24G dual-GPU server, use tensor parallelism:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.90 MAX_MODEL_LEN=4096 \
+  bash scripts/start_vllm_qwen35_9b.sh
+```
+
 The experiment client uses the OpenAI-compatible HTTP API directly via the
 standard library. It does not require `openai` or an `OPENAI_API_KEY`.
 
