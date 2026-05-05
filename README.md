@@ -173,6 +173,10 @@ python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_off
 
 # Requires the local vLLM service above.
 python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+
+# Run only after the no-memory scan3 failure taxonomy is stable.
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml
 ```
 
 `data/external/` is ignored by git. The old `tau-bench` repository is kept for
@@ -232,6 +236,7 @@ runs/tiny_nomem_seed1/
   candidate_memories.jsonl
   memory_updates.jsonl
   replay_results.jsonl
+  failure_taxonomy.json
   metrics.json
 ```
 
@@ -374,6 +379,11 @@ tool_semantic_errors
 `metrics.json` also includes `with_memory_fail_no_memory_success`, `negative_transfer_rate`, `harmful_memory_ids`, and gate acceptance/rejection counts.
 Tau-retail evaluator-alignment runs additionally report `evaluation_modes`, `state_diff_evaluated_count`, `state_diff_passed_count`, `state_diff_failed_count`, `expected_actions_evaluated_count`, `expected_actions_matched_count`, `expected_actions_failed_count`, `communicate_info_evaluated_count`, `communicate_info_passed_count`, `nl_assertion_evaluated_count`, `nl_assertion_passed_count`, `unsupported_official_criteria_count`, `policy_violation_count`, `tool_observation_error_count`, `expected_negative_observation_count`, `tool_semantic_error_count`, and `evaluator_error_types`.
 `tool_observation_error_count` counts every `ok=false` tool result, while `expected_negative_observation_count` separates matched expected read lookups that return a negative observation under official tau2 action-replay. `tool_semantic_error_count` is reserved for remaining non-policy, non-expected tool failures.
+Every run also writes `failure_taxonomy.json`, which summarizes each task's
+primary failure type, key evaluator counts, trace event counts, and the last
+model decision audit fields. `metrics.json` mirrors the aggregate taxonomy
+counts as `failure_taxonomy_*`, `expected_actions_complete_count`,
+`model_action_repair_count`, and `model_parse_error_count`.
 For local real-actor runs, `models.actor.provider=vllm` expects an
 OpenAI-compatible endpoint. Useful actor fields are `base_url_env`, `base_url`,
 `api_key` or `api_key_env`, `healthcheck`, `timeout_seconds`, `request_retries`,
@@ -396,28 +406,26 @@ pytest
 
 ## Next Milestone
 
-Phase two round six hardens the local Qwen/vLLM real-actor output protocol
-before expanding official tau2 samples:
+Phase two round eight should harden the local Qwen/vLLM real actor before any
+memory-method comparison. Round seven no-memory scan3 kept task `0` stable, but
+tasks `1` and `2` failed with truncated JSON in long `thought` strings:
 
-1. `ReActToolAgent` records raw parsed model decisions when
-   `logging.save_raw_model_io=true`; invalid decisions also keep raw response
-   text even when raw IO logging is disabled.
-2. The prompt now states a stricter output contract: each assistant message
-   must be exactly one JSON object with `action`, and tool calls must include
-   `tool_name` and `args`.
-3. Conservative action repair handles the common real-actor case where the
-   model emits a recognizable `tool`/`tool_name` plus dict `args`/`arguments`
-   but omits `action`; repairs are logged as `model_action_repair` events.
-4. Continue to start with
-   `configs/tau_retail_phase2_official_tau2_real_actor_nomem.yaml` at
-   `max_tasks=1`; raise to `max_tasks=3` only after failures are explainable
-   through action/state/communicate/nl/tool taxonomy.
-5. Use `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` as
-   the fallback compatibility scan when the vLLM service is unavailable or GPU
-   scheduling is blocked.
-6. Keep `nt_memevo_gate`, support verification, and scope refinement out of the
-   official tau2 main path until real no-memory and raw-trace actor failures are
-   stable and explainable.
-7. Keep the first-stage regression matrix green, especially tiny refinement,
-   unsafe polluted negative transfer, phase-two state fixture, and official
-   tau2 no-memory/raw-trace/action-replay probes.
+1. Keep `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` as
+   the adapter/evaluator/failure-taxonomy compatibility guardrail.
+2. Tighten `ReActToolAgent` output instructions so each decision is a compact
+   JSON object; avoid copying full observations or product variant lists into
+   `thought`.
+3. Evaluate vLLM/OpenAI-compatible structured output support, such as guided
+   JSON or JSON schema, while preserving raw-response and repair/parse audit
+   logs.
+4. Split `invalid_json_response` taxonomy so token-budget truncation can be
+   tracked separately from other malformed model outputs.
+5. Re-run
+   `configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml` after
+   the parser/output-control fix. Run
+   `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`
+   only after no-memory scan3 no longer fails from parser truncation and any
+   remaining failures are explainable via action/tool/communicate/nl taxonomy.
+6. Continue to keep `nt_memevo_gate`, support verification, scope refinement,
+   and larger memory-method comparisons out of the official real-actor path
+   until no-memory and raw-trace small-sample failure taxonomies are stable.

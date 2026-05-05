@@ -10,6 +10,10 @@ from ntmemevo.agents.action_replay_agent import ActionReplayAgent
 from ntmemevo.agents.react_agent import ReActToolAgent
 from ntmemevo.config import load_config
 from ntmemevo.envs.factory import create_env
+from ntmemevo.evaluation.failure_taxonomy import (
+    failure_taxonomy_metric_summary,
+    write_failure_taxonomy,
+)
 from ntmemevo.evaluation.metrics import aggregate_negative_transfer, aggregate_results
 from ntmemevo.evaluation.replay import ReplayConfig, ReplayResult, run_memory_replays
 from ntmemevo.evaluation.verification import (
@@ -650,6 +654,8 @@ def run(config_path: str) -> dict[str, Any]:
         metrics["active_memory_count"] = lifecycle_counts.get("active", 0)
         metrics["quarantined_memory_count"] = lifecycle_counts.get("quarantined", 0)
         metrics["retired_memory_count"] = lifecycle_counts.get("retired", 0)
+    failure_taxonomy = write_failure_taxonomy(run_logger.output_dir)
+    metrics.update(failure_taxonomy_metric_summary(failure_taxonomy))
     run_logger.write_metrics(metrics)
     return metrics
 

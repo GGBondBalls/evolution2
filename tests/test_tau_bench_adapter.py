@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from ntmemevo.config import load_config
 from ntmemevo.envs.tau_bench import TauBenchEnv
 from ntmemevo.experiments.run_stream import run
 from ntmemevo.types import Task
@@ -1256,6 +1257,23 @@ def test_tau_retail_phase2_state_config_logs_evaluator_details(tmp_path: Path) -
     assert policy_fail_record["evaluation_details"]["tool_semantic_error_count"] == 0
     assert policy_fail_record["evaluation_details"]["expected_actions_matched"] is True
 
+    taxonomy = json.loads((output_dir / "failure_taxonomy.json").read_text(encoding="utf-8"))
+    assert taxonomy["num_tasks"] == 3
+    assert taxonomy["success_count"] == 2
+    assert taxonomy["failure_count"] == 1
+    assert taxonomy["primary_failure_types"]["policy_violation"] == 1
+    assert metrics["failure_taxonomy_task_count"] == 3
+    assert metrics["failure_taxonomy_failure_count"] == 1
+    assert metrics["failure_taxonomy_primary_types"]["policy_violation"] == 1
+    failure_task = next(
+        task
+        for task in taxonomy["tasks"]
+        if task["task_id"] == "tau_retail_phase2_return_policy_fail_001"
+    )
+    assert failure_task["primary_failure_type"] == "policy_violation"
+    assert failure_task["policy_violation_count"] == 1
+    assert failure_task["first_policy_violation"]["classification"] == "policy_violation"
+
 
 def test_tau_retail_phase2_raw_trace_keeps_evaluator_details(tmp_path: Path) -> None:
     config_path = tmp_path / "tau_retail_phase2_raw.yaml"
@@ -1285,3 +1303,35 @@ def test_tau_retail_phase2_raw_trace_keeps_evaluator_details(tmp_path: Path) -> 
 
     assert len(memory_records) == 3
     assert all("evaluation_details" in record for record in run_records)
+
+
+def test_phase2_real_actor_scan_configs_preserve_protocol_hardening_baseline() -> None:
+    nomem = load_config(
+        "configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml"
+    )
+    raw_trace = load_config(
+        "configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml"
+    )
+
+    assert nomem.experiment["name"] == (
+        "tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1"
+    )
+    assert nomem.benchmark["max_tasks"] == 3
+    assert nomem.agent["memory_top_k"] == 0
+    assert nomem.agent["stop_after_expected_actions"] is True
+    assert nomem.models["actor"]["provider"] == "vllm"
+    assert nomem.models["actor"]["temperature"] == 0.0
+    assert nomem.models["actor"]["max_tokens"] == 512
+    assert nomem.models["actor"]["context_overflow_margin_tokens"] == 256
+    assert nomem.logging["save_raw_model_io"] is True
+
+    assert raw_trace.experiment["name"] == (
+        "tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3_seed1"
+    )
+    assert raw_trace.benchmark["max_tasks"] == 3
+    assert raw_trace.agent["memory_top_k"] == 2
+    assert raw_trace.agent["stop_after_expected_actions"] is True
+    assert raw_trace.models["actor"]["provider"] == "vllm"
+    assert raw_trace.models["actor"]["max_tokens"] == 512
+    assert raw_trace.raw["memory"]["method"] == "raw_trace_rag"
+    assert raw_trace.raw["memory"]["top_k"] == 2

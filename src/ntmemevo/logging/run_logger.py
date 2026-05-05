@@ -28,6 +28,10 @@ class RunLogger:
         ]:
             path = self.output_dir / name
             path.write_text("", encoding="utf-8")
+        for name in ["metrics.json", "failure_taxonomy.json"]:
+            path = self.output_dir / name
+            if path.exists():
+                path.unlink()
 
     def log_run(
         self,
