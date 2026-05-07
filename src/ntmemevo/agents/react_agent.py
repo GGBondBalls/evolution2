@@ -11,6 +11,24 @@ from ntmemevo.logging.trace_logger import TraceLogger
 from ntmemevo.types import AgentResult, ChatMessage, RetrievedMemory, Task
 
 
+REACT_TOOL_DECISION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "thought": {
+            "type": "string",
+            "maxLength": 80,
+            "description": "A very short audit label. Leave empty when possible.",
+        },
+        "action": {"type": "string", "enum": ["tool", "final"]},
+        "tool_name": {"type": "string"},
+        "args": {"type": "object", "additionalProperties": True},
+        "answer": {"type": "string"},
+    },
+    "required": ["action"],
+    "additionalProperties": True,
+}
+
+
 class ReActToolAgent(Agent):
     def __init__(
         self,
@@ -50,11 +68,12 @@ class ReActToolAgent(Agent):
 
         for step in range(1, self.max_steps + 1):
             messages = self._build_messages(task, env, observations, memories)
+            max_tokens = int(self.model_config.get("max_tokens", 1024))
             response = self.llm.complete(
                 messages=messages,
                 temperature=float(self.model_config.get("temperature", 0.0)),
-                max_tokens=int(self.model_config.get("max_tokens", 1024)),
-                response_format={"type": "json_object"},
+                max_tokens=max_tokens,
+                response_format=self._response_format(),
             )
             prompt_tokens += response.usage.prompt_tokens
             completion_tokens += response.usage.completion_tokens
@@ -62,14 +81,21 @@ class ReActToolAgent(Agent):
             raw_response = response.content
             try:
                 parsed_decision = json.loads(raw_response)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                parse_detail = _classify_json_parse_error(
+                    raw_response=raw_response,
+                    exc=exc,
+                    max_tokens=max_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                    finish_reason=_extract_finish_reason(response.raw),
+                )
                 final_answer = response.content
-                error_type = "invalid_json_response"
+                error_type = str(parse_detail["error_type"])
                 trace_logger.log_event(
                     task_id=task.task_id,
                     step=step,
                     event_type="model_parse_error",
-                    payload={"raw_response": raw_response, "parse_error": "json_decode_error"},
+                    payload={"raw_response": raw_response, **parse_detail},
                 )
                 break
             if not isinstance(parsed_decision, dict):
@@ -216,10 +242,17 @@ class ReActToolAgent(Agent):
                 observation_block,
                 "Output contract:",
                 "Return exactly one JSON object and no markdown or extra text.",
-                'For a tool call, use {"thought":"...","action":"tool","tool_name":"name","args":{...}}.',
-                'For a final answer, use {"thought":"...","action":"final","answer":"..."}.',
+                'For a tool call, prefer {"thought":"","action":"tool","tool_name":"name","args":{...}}.',
+                'For a final answer, prefer {"thought":"","action":"final","answer":"..."}.',
                 'Do not return only a thought. Do not omit "action".',
                 'When action is "tool", do not omit "tool_name" or "args".',
+                "Keep thought empty or under 8 words. Never copy observations, product variants, IDs lists, or long reasoning into thought.",
+                "If you need more information, call exactly one next tool instead of writing a long analysis.",
+                "Retail tool-use guardrails:",
+                "Use get_product_details(product_id) to inspect product variants; count available variants from the observation without copying the list.",
+                "Use get_item_details(item_id) only for a concrete item id, not for a product id.",
+                "Use list_all_product_types at most once; it returns type names only and does not reveal product ids.",
+                "After get_user_details returns a user, use its order ids with get_order_details; do not repeat the same get_user_details call.",
             ]
         )
         user = "\n".join(user_lines)
@@ -229,11 +262,36 @@ class ReActToolAgent(Agent):
                 content=(
                     "You are a careful tool-using agent. "
                     "Call tools when needed and answer only when observations are sufficient. "
-                    "Every assistant response must be exactly one JSON object with an action field."
+                    "Every assistant response must be exactly one compact JSON object with an action field. "
+                    "Use an empty or very short thought field; do not expose chain-of-thought."
                 ),
             ),
             ChatMessage(role="user", content=user),
         ]
+
+    def _response_format(self) -> dict[str, Any] | None:
+        configured = self.model_config.get("response_format")
+        if configured is None:
+            return {"type": "json_object"}
+        if isinstance(configured, bool):
+            return {"type": "json_object"} if configured else None
+        if isinstance(configured, dict):
+            return dict(configured)
+        mode = str(configured).strip().lower()
+        if mode in {"", "none", "false", "disabled"}:
+            return None
+        if mode in {"json_object", "object"}:
+            return {"type": "json_object"}
+        if mode in {"json_schema", "schema"}:
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "react_tool_decision",
+                    "schema": REACT_TOOL_DECISION_JSON_SCHEMA,
+                    "strict": False,
+                },
+            }
+        raise ValueError(f"Unsupported models.actor.response_format: {configured!r}")
 
     def _format_memories(self, memories: list[RetrievedMemory]) -> str:
         lines = ["Retrieved memories:"]
@@ -349,3 +407,92 @@ def _extract_args(decision: dict[str, Any]) -> tuple[dict[str, Any], str | None]
         if isinstance(value, dict):
             return dict(value), key
     return {}, None
+
+
+def _classify_json_parse_error(
+    raw_response: str,
+    exc: json.JSONDecodeError,
+    max_tokens: int,
+    completion_tokens: int,
+    finish_reason: str | None,
+) -> dict[str, Any]:
+    stripped = raw_response.strip()
+    unclosed_json_object = _looks_like_unclosed_json_object(stripped)
+    token_budget_hit = _token_budget_hit(
+        completion_tokens=completion_tokens,
+        max_tokens=max_tokens,
+        finish_reason=finish_reason,
+    )
+    error_type = (
+        "truncated_json_response"
+        if stripped.startswith("{") and unclosed_json_object and token_budget_hit
+        else "invalid_json_response"
+    )
+    parse_error = (
+        "truncated_json_response"
+        if error_type == "truncated_json_response"
+        else "json_decode_error"
+    )
+    return {
+        "error_type": error_type,
+        "parse_error": parse_error,
+        "json_error": exc.msg,
+        "json_error_pos": exc.pos,
+        "raw_response_chars": len(raw_response),
+        "starts_with_json_object": stripped.startswith("{"),
+        "unclosed_json_object": unclosed_json_object,
+        "completion_tokens": completion_tokens,
+        "max_tokens": max_tokens,
+        "finish_reason": finish_reason,
+        "token_budget_hit": token_budget_hit,
+    }
+
+
+def _looks_like_unclosed_json_object(text: str) -> bool:
+    if not text.startswith("{"):
+        return False
+    depth = 0
+    in_string = False
+    escape = False
+    for char in text:
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+    return in_string or depth > 0
+
+
+def _token_budget_hit(
+    completion_tokens: int,
+    max_tokens: int,
+    finish_reason: str | None,
+) -> bool:
+    if finish_reason and finish_reason.lower() in {"length", "max_tokens"}:
+        return True
+    if max_tokens <= 0 or completion_tokens <= 0:
+        return False
+    return completion_tokens >= max(1, int(max_tokens * 0.95))
+
+
+def _extract_finish_reason(raw: dict[str, Any]) -> str | None:
+    response = raw.get("response") if isinstance(raw, dict) else None
+    if not isinstance(response, dict):
+        response = raw if isinstance(raw, dict) else {}
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            reason = first.get("finish_reason")
+            if reason is not None:
+                return str(reason)
+    return None

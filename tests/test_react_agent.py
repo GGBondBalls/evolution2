@@ -9,8 +9,11 @@ from ntmemevo.types import ChatMessage, LLMResponse, LLMUsage, Task, ToolResult
 
 
 class _SequenceLLM(LLMClient):
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(self, responses: list[str], completion_tokens: int = 5) -> None:
         self.responses = list(responses)
+        self.completion_tokens = completion_tokens
+        self.response_formats: list[dict[str, Any] | None] = []
+        self.message_history: list[list[ChatMessage]] = []
 
     def complete(
         self,
@@ -19,13 +22,20 @@ class _SequenceLLM(LLMClient):
         max_tokens: int = 1024,
         response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        del temperature, max_tokens
+        self.response_formats.append(response_format)
+        self.message_history.append(list(messages))
         if not self.responses:
             raise AssertionError("No fake LLM responses remain.")
         content = self.responses.pop(0)
         return LLMResponse(
             content=content,
             model="fake-model",
-            usage=LLMUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            usage=LLMUsage(
+                prompt_tokens=10,
+                completion_tokens=self.completion_tokens,
+                total_tokens=10 + self.completion_tokens,
+            ),
         )
 
 
@@ -116,6 +126,8 @@ def test_react_agent_keeps_valid_tool_action_unchanged() -> None:
     assert decisions[0]["tool_name"] == "get_order_status"
     assert decisions[0]["repair_status"] == "not_needed"
     assert decisions[0]["raw_response"] == raw_tool_response
+    assert llm.response_formats[0] == {"type": "json_object"}
+    assert "Keep thought empty or under 8 words." in llm.message_history[0][1].content
 
 
 def test_react_agent_repairs_missing_action_when_tool_fields_are_present() -> None:
@@ -215,3 +227,51 @@ def test_react_agent_can_stop_after_expected_actions_complete() -> None:
         event["event_type"] == "expected_actions_complete"
         for event in trace_logger.events
     )
+
+
+def test_react_agent_can_request_json_schema_response_format() -> None:
+    llm = _SequenceLLM(
+        ['{"action":"final","answer":"Order ORD-1001 is delivered."}']
+    )
+    env = _OneToolEnv()
+    trace_logger = _CapturingTraceLogger()
+
+    result = ReActToolAgent(
+        llm=llm,
+        model_config={"response_format": "json_schema"},
+        max_steps=4,
+    ).run(task=_task(), env=env, trace_logger=trace_logger)
+
+    response_format = llm.response_formats[0]
+    assert result.success is True
+    assert response_format is not None
+    assert response_format["type"] == "json_schema"
+    schema = response_format["json_schema"]["schema"]
+    assert schema["properties"]["action"]["enum"] == ["tool", "final"]
+    assert schema["properties"]["thought"]["maxLength"] == 80
+
+
+def test_react_agent_classifies_token_budget_truncated_json() -> None:
+    raw_response = '{"thought":"I will copy a very long observation and never close'
+    llm = _SequenceLLM([raw_response], completion_tokens=100)
+    env = _OneToolEnv()
+    trace_logger = _CapturingTraceLogger()
+
+    result = ReActToolAgent(
+        llm=llm,
+        model_config={"max_tokens": 100},
+        max_steps=4,
+        log_raw_model_io=True,
+    ).run(task=_task(), env=env, trace_logger=trace_logger)
+
+    parse_errors = [
+        event for event in trace_logger.events if event["event_type"] == "model_parse_error"
+    ]
+    assert result.success is False
+    assert result.error_type == "truncated_json_response"
+    assert len(parse_errors) == 1
+    assert parse_errors[0]["error_type"] == "truncated_json_response"
+    assert parse_errors[0]["parse_error"] == "truncated_json_response"
+    assert parse_errors[0]["starts_with_json_object"] is True
+    assert parse_errors[0]["unclosed_json_object"] is True
+    assert parse_errors[0]["token_budget_hit"] is True

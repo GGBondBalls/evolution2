@@ -380,15 +380,23 @@ tool_semantic_errors
 Tau-retail evaluator-alignment runs additionally report `evaluation_modes`, `state_diff_evaluated_count`, `state_diff_passed_count`, `state_diff_failed_count`, `expected_actions_evaluated_count`, `expected_actions_matched_count`, `expected_actions_failed_count`, `communicate_info_evaluated_count`, `communicate_info_passed_count`, `nl_assertion_evaluated_count`, `nl_assertion_passed_count`, `unsupported_official_criteria_count`, `policy_violation_count`, `tool_observation_error_count`, `expected_negative_observation_count`, `tool_semantic_error_count`, and `evaluator_error_types`.
 `tool_observation_error_count` counts every `ok=false` tool result, while `expected_negative_observation_count` separates matched expected read lookups that return a negative observation under official tau2 action-replay. `tool_semantic_error_count` is reserved for remaining non-policy, non-expected tool failures.
 Every run also writes `failure_taxonomy.json`, which summarizes each task's
-primary failure type, key evaluator counts, trace event counts, and the last
-model decision audit fields. `metrics.json` mirrors the aggregate taxonomy
+primary failure type, key evaluator counts, trace event counts, the last
+model decision audit fields, and the first model parse-error audit fields when
+JSON parsing fails. Token-budget JSON truncation is separated as
+`truncated_json_response` when the response starts like a JSON object, remains
+unclosed, and the completion appears to hit the response token budget.
+`metrics.json` mirrors the aggregate taxonomy
 counts as `failure_taxonomy_*`, `expected_actions_complete_count`,
-`model_action_repair_count`, and `model_parse_error_count`.
+`model_action_repair_count`, `model_parse_error_count`, and
+`truncated_json_response_count`.
 For local real-actor runs, `models.actor.provider=vllm` expects an
 OpenAI-compatible endpoint. Useful actor fields are `base_url_env`, `base_url`,
 `api_key` or `api_key_env`, `healthcheck`, `timeout_seconds`, `request_retries`,
-`strip_thinking`, `extract_json_object`, `disable_response_format`, and
-`extra_body`. For local 4096-token context windows, keep real-actor
+`strip_thinking`, `extract_json_object`, `disable_response_format`,
+`response_format`, and `extra_body`. `response_format` defaults to
+`json_object`; set it to `json_schema` only after confirming the local
+OpenAI-compatible server supports JSON schema response formats. For local
+4096-token context windows, keep real-actor
 `max_tokens` conservative for one-step JSON decisions; the client also supports
 `context_overflow_margin_tokens` to lower `max_tokens` and retry when vLLM
 returns a context-overflow 400 response.
@@ -406,26 +414,26 @@ pytest
 
 ## Next Milestone
 
-Phase two round eight should harden the local Qwen/vLLM real actor before any
-memory-method comparison. Round seven no-memory scan3 kept task `0` stable, but
-tasks `1` and `2` failed with truncated JSON in long `thought` strings:
+Phase two round eight hardens the local Qwen/vLLM real actor before any
+memory-method comparison. The code now asks for compact JSON decisions with an
+empty or very short `thought`, adds retail tool-use guardrails, exposes an
+opt-in JSON schema response format, and splits token-budget truncation from
+generic invalid JSON. The next milestone is experimental validation:
 
 1. Keep `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` as
    the adapter/evaluator/failure-taxonomy compatibility guardrail.
-2. Tighten `ReActToolAgent` output instructions so each decision is a compact
-   JSON object; avoid copying full observations or product variant lists into
-   `thought`.
-3. Evaluate vLLM/OpenAI-compatible structured output support, such as guided
-   JSON or JSON schema, while preserving raw-response and repair/parse audit
-   logs.
-4. Split `invalid_json_response` taxonomy so token-budget truncation can be
-   tracked separately from other malformed model outputs.
-5. Re-run
+2. Re-run
    `configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml` after
-   the parser/output-control fix. Run
+   the parser/output-control fix and inspect `failure_taxonomy.json` for
+   `truncated_json_response_count`, `model_parse_error_count`, and per-task
+   `first_model_parse_error`.
+3. Run
    `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`
    only after no-memory scan3 no longer fails from parser truncation and any
    remaining failures are explainable via action/tool/communicate/nl taxonomy.
-6. Continue to keep `nt_memevo_gate`, support verification, scope refinement,
+4. If the local vLLM server supports schema response formats, try setting
+   `models.actor.response_format: json_schema` in a temporary scan3 config and
+   compare parser failure counts against the default `json_object` run.
+5. Continue to keep `nt_memevo_gate`, support verification, scope refinement,
    and larger memory-method comparisons out of the official real-actor path
    until no-memory and raw-trace small-sample failure taxonomies are stable.

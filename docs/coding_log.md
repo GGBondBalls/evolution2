@@ -2104,3 +2104,93 @@ cat runs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3_seed1/fa
 3. 细化 failure taxonomy：把 raw response 以 JSON object 开头但未闭合、且明显被 token budget 截断的 `invalid_json_response` 进一步标成 `truncated_json_response`，避免与普通非法 JSON 混淆。
 4. 针对 task `2` 加强工具使用提示或 retail lookup 策略，减少模型在需要 product details/product ids 时重复调用 `list_all_product_types` 和 `get_user_details`。
 5. 第八轮复验仍先跑 `python -m pytest`、action-replay scan10 和 no-memory scan3；只有 no-memory scan3 不再出现 parser 截断，且失败能稳定落入 action/tool/communicate/nl taxonomy 后，才运行 `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`。
+
+## 2026-05-07 第二阶段第八轮
+
+目标：落实真实 actor JSON 输出协议加固与截断失败 taxonomy 细分，优先消除第七轮 no-memory scan3 中 task `1/2` 的长 `thought` 导致 JSON 被 `max_tokens=512` 截断的问题；同时为后续 vLLM/OpenAI-compatible JSON schema 结构化输出实验留出可配置入口。
+
+已完成编码：
+
+1. 修改 `src/ntmemevo/agents/react_agent.py`，将 ReAct 输出契约从“必须写 thought”收紧为“优先空 thought 或 8 词以内短审计标签”，并明确禁止把完整 observation、product variants、ID 列表或长推理复制进 `thought`。
+2. 在真实 retail 工具提示中新增 guardrails：`get_product_details(product_id)` 用于检查 product variants、`get_item_details(item_id)` 只用于 concrete item id、`list_all_product_types` 至多调用一次且不提供 product id、`get_user_details` 返回 user 后应转向 order ids 的 `get_order_details`，避免重复用户查询。
+3. 新增 `REACT_TOOL_DECISION_JSON_SCHEMA` 与 `models.actor.response_format` 解析逻辑；默认保持 `json_object`，可通过 `models.actor.response_format: json_schema` 试验 OpenAI-compatible JSON schema 响应格式。
+4. 修改 parse error 处理：当 raw response 以 JSON object 开头、对象/字符串未闭合，并且 `finish_reason=length` 或 completion tokens 接近 `max_tokens` 时，将 agent `error_type` 标记为 `truncated_json_response`，否则仍为 `invalid_json_response`。
+5. `model_parse_error` trace event 新增 `error_type`、`parse_error`、`json_error`、`json_error_pos`、`raw_response_chars`、`starts_with_json_object`、`unclosed_json_object`、`completion_tokens`、`max_tokens`、`finish_reason` 和 `token_budget_hit`，保留 raw response 审计。
+6. 修改 `src/ntmemevo/evaluation/failure_taxonomy.py`，将 `truncated_json_response` 从普通 `model_parse_error` 中拆出，`failure_taxonomy.json.tasks[*]` 新增 `first_model_parse_error` 摘要，`metrics.json` 新增 `truncated_json_response_count`。
+7. 三个真实 actor 配置显式写入 `models.actor.response_format: json_object`：`tau_retail_phase2_official_tau2_real_actor_nomem.yaml`、`tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml`、`tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`。
+8. 更新 `README.md`，记录 `truncated_json_response`、`first_model_parse_error`、`truncated_json_response_count`、`models.actor.response_format` 的使用方式和第八轮后的实验顺序。
+9. 新增/更新测试：默认 `json_object` response_format、可选 `json_schema` response_format、短 thought prompt guardrail、token-budget truncated JSON 分类、failure taxonomy 截断分类，以及 scan3 配置字段。
+
+关键实现说明：
+
+1. 本轮不把 `json_schema` 默认打开，因为本地 vLLM/OpenAI-compatible server 是否支持该格式取决于服务版本；默认配置仍使用第六/七轮已验证过的 `json_object`，结构化 schema 作为临时实验开关。
+2. `truncated_json_response` 是保守分类：必须同时满足“像未闭合 JSON object”和“明显打到输出 token budget”。普通非法 JSON 不会被误标为截断。
+3. 本轮没有向 prompt 泄露官方 expected actions 或 hidden product ids。task `2` 的 product-id 可发现性仍可能暴露为 action/tool/communicate/nl failure；这是应被记录的真实 actor/adapter 能力边界，不在第八轮通过硬编码修掉。
+4. 本轮仍不进入 raw-trace-rag、`nt_memevo_gate`、support verification、scope refinement 或 memory 方法收益实验。
+
+本地验证：
+
+1. `conda run -n rm python -m py_compile src/ntmemevo/agents/react_agent.py src/ntmemevo/evaluation/failure_taxonomy.py tests/test_react_agent.py tests/test_tau_bench_adapter.py` 通过。
+2. `conda run -n rm python -m pytest tests/test_react_agent.py tests/test_tau_bench_adapter.py::test_failure_taxonomy_splits_truncated_json_from_other_parse_errors tests/test_tau_bench_adapter.py::test_phase2_real_actor_scan_configs_preserve_protocol_hardening_baseline -q` 通过：`8 passed in 0.09s`。
+3. `conda run -n rm python -m pytest -q` 通过：`47 passed in 0.15s`。
+4. `conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` 通过。
+5. action-replay scan10 guardrail 结果：`num_tasks=10`、`success_rate=1.0`、`expected_actions_matched_count=10`、`expected_actions_failed_count=0`、`tool_observation_error_count=3`、`expected_negative_observation_count=3`、`tool_semantic_error_count=0`、`communicate_info_passed_count=3`、`nl_assertion_passed_count=3`、`failure_taxonomy_primary_types={"success": 10}`、`model_parse_error_count=0`、`truncated_json_response_count=0`。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev,vllm]"
+python -m pytest
+
+# 不依赖 GPU 的 adapter/evaluator/taxonomy guardrail。
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/failure_taxonomy.json
+
+# 终端 1：启动本地 Qwen/vLLM 服务。
+CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.85 MAX_MODEL_LEN=4096 \
+  bash scripts/start_vllm_qwen35_9b.sh
+
+# 终端 2：真实 actor no-memory scan3。
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+curl http://127.0.0.1:8000/v1/models
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/failure_taxonomy.json
+grep '"event_type": "expected_actions_complete"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs.jsonl
+```
+
+可选 JSON schema 实验：
+
+```bash
+cp configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml /tmp/tau_retail_real_actor_nomem_scan3_json_schema.yaml
+sed -i 's/name: tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/name: tau_retail_phase2_official_tau2_real_actor_nomem_scan3_json_schema_seed1/' /tmp/tau_retail_real_actor_nomem_scan3_json_schema.yaml
+sed -i 's#output_dir: runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1#output_dir: runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_json_schema_seed1#' /tmp/tau_retail_real_actor_nomem_scan3_json_schema.yaml
+sed -i 's/response_format: json_object/response_format: json_schema/' /tmp/tau_retail_real_actor_nomem_scan3_json_schema.yaml
+python -m ntmemevo.experiments.run_stream --config /tmp/tau_retail_real_actor_nomem_scan3_json_schema.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_json_schema_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_json_schema_seed1/failure_taxonomy.json
+```
+
+实验日志填写建议：
+
+1. no-memory scan3 重点记录 `model_parse_error_count`、`truncated_json_response_count`、`failure_taxonomy_primary_types`、逐任务 `first_model_parse_error`、`expected_actions_complete_count`、`expected_actions_matched_count` 和 `communicate_info/nl_assertion` 结果。
+2. 若第八轮后仍有 parse error，区分 `truncated_json_response` 与普通 `invalid_json_response`；前者说明输出仍撞 token budget，后者说明格式约束或 JSON 提取仍不足。
+3. 若 parser 截断消失但 task `2` 失败，优先记录首个 `action_mismatch`、重复工具调用、是否仍重复 `list_all_product_types/get_user_details`、是否无法发现 product id，以及 communicate/nl 断言差异。
+4. 只有 no-memory scan3 无 parser 截断，且失败可稳定落入 action/tool/communicate/nl taxonomy 后，才运行 `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`。
+
+当前边界：
+
+1. 本轮编码环境没有运行本地 vLLM 服务，因此没有产生新的真实 actor scan3 结果；真实 actor 复验仍由用户在 GPU 环境执行。
+2. 第八轮的目标是 parser/output-control 与 taxonomy 稳定，不是提升官方 tau2 retail 整体成功率，也不是证明 memory 方法收益。
+3. `json_schema` response_format 是可选实验入口，不保证所有 vLLM/OpenAI-compatible 版本都支持；若服务返回 400 或 unsupported response_format，应回退 `json_object` 并记录。
+
+下一步建议：
+
+1. 用户先运行 no-memory scan3，确认第七轮的 `model_parse_error/invalid_json_response` 是否转为 0，或被细分为 `truncated_json_response`。
+2. 若 no-memory scan3 仍存在 `truncated_json_response`，继续收紧 prompt 或尝试 `response_format: json_schema` / vLLM guided JSON；暂不运行 raw-trace-rag。
+3. 若 no-memory scan3 无 parser 截断，再运行 raw-trace-rag scan3 做日志形态对照；比较 `avg_prompt_tokens`、`model_parse_error_count`、`truncated_json_response_count`、`expected_actions_matched_count` 和 `failure_taxonomy_primary_types`。

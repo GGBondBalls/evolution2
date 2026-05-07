@@ -7,6 +7,10 @@ import pytest
 
 from ntmemevo.config import load_config
 from ntmemevo.envs.tau_bench import TauBenchEnv
+from ntmemevo.evaluation.failure_taxonomy import (
+    failure_taxonomy_metric_summary,
+    summarize_failure_taxonomy,
+)
 from ntmemevo.experiments.run_stream import run
 from ntmemevo.types import Task
 
@@ -1275,6 +1279,65 @@ def test_tau_retail_phase2_state_config_logs_evaluator_details(tmp_path: Path) -
     assert failure_task["first_policy_violation"]["classification"] == "policy_violation"
 
 
+def test_failure_taxonomy_splits_truncated_json_from_other_parse_errors(tmp_path: Path) -> None:
+    (tmp_path / "runs.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run_truncated",
+                "task_id": "task_truncated",
+                "success": False,
+                "reward": 0.0,
+                "num_steps": 4,
+                "tool_calls": 3,
+                "prompt_tokens": 100,
+                "completion_tokens": 100,
+                "memory_policy": "none",
+                "error_type": "truncated_json_response",
+                "evaluation_details": {
+                    "expected_actions_matched": False,
+                    "expected_action_count": 5,
+                    "actual_action_count": 3,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "trace_events.jsonl").write_text(
+        json.dumps(
+            {
+                "task_id": "task_truncated",
+                "step": 4,
+                "event_type": "model_parse_error",
+                "raw_response": '{"thought":"unfinished',
+                "error_type": "truncated_json_response",
+                "parse_error": "truncated_json_response",
+                "json_error": "Unterminated string starting at",
+                "json_error_pos": 11,
+                "starts_with_json_object": True,
+                "unclosed_json_object": True,
+                "completion_tokens": 100,
+                "max_tokens": 100,
+                "token_budget_hit": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    taxonomy = summarize_failure_taxonomy(tmp_path)
+    metrics = failure_taxonomy_metric_summary(taxonomy)
+
+    assert taxonomy["primary_failure_types"] == {"truncated_json_response": 1}
+    assert taxonomy["error_types"] == {"truncated_json_response": 1}
+    assert metrics["model_parse_error_count"] == 1
+    assert metrics["truncated_json_response_count"] == 1
+    task = taxonomy["tasks"][0]
+    assert task["primary_failure_type"] == "truncated_json_response"
+    assert task["first_model_parse_error"]["parse_error"] == "truncated_json_response"
+    assert task["first_model_parse_error"]["token_budget_hit"] is True
+
+
 def test_tau_retail_phase2_raw_trace_keeps_evaluator_details(tmp_path: Path) -> None:
     config_path = tmp_path / "tau_retail_phase2_raw.yaml"
     output_dir = tmp_path / "runs" / "phase2_raw"
@@ -1322,6 +1385,7 @@ def test_phase2_real_actor_scan_configs_preserve_protocol_hardening_baseline() -
     assert nomem.models["actor"]["provider"] == "vllm"
     assert nomem.models["actor"]["temperature"] == 0.0
     assert nomem.models["actor"]["max_tokens"] == 512
+    assert nomem.models["actor"]["response_format"] == "json_object"
     assert nomem.models["actor"]["context_overflow_margin_tokens"] == 256
     assert nomem.logging["save_raw_model_io"] is True
 
@@ -1333,5 +1397,6 @@ def test_phase2_real_actor_scan_configs_preserve_protocol_hardening_baseline() -
     assert raw_trace.agent["stop_after_expected_actions"] is True
     assert raw_trace.models["actor"]["provider"] == "vllm"
     assert raw_trace.models["actor"]["max_tokens"] == 512
+    assert raw_trace.models["actor"]["response_format"] == "json_object"
     assert raw_trace.raw["memory"]["method"] == "raw_trace_rag"
     assert raw_trace.raw["memory"]["top_k"] == 2

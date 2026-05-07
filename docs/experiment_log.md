@@ -2988,4 +2988,75 @@ tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3_se
 
 ### 下一步
 
-当前下一步不是运行本配置，而是进入第二阶段第八轮：修复/收紧真实 actor JSON 输出协议，复跑 no-memory scan3。若 no-memory 与 raw-trace-rag scan3 后续都能形成稳定、可解释 taxonomy，再进入 memory 对照准入标准设计；在此之前继续暂缓 `nt_memevo_gate`、support verification、scope refinement 和正式 memory 方法收益实验。
+当前仍不建议直接运行本 raw-trace-rag 配置。第二阶段第八轮已经修复/收紧真实 actor JSON 输出协议，下一步应先复跑 no-memory scan3，确认 parser 截断消失或被明确标记为 `truncated_json_response`。若 no-memory 与 raw-trace-rag scan3 后续都能形成稳定、可解释 taxonomy，再进入 memory 对照准入标准设计；在此之前继续暂缓 `nt_memevo_gate`、support verification、scope refinement 和正式 memory 方法收益实验。
+
+## tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1 第八轮输出协议加固复验
+
+### 实验名称
+
+`tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1`
+
+### 日期与环境
+
+待填写。应记录 Linux 机器、conda 环境 `rm`、Python 版本、pytest 版本、本地 vLLM 模型名、`max_model_len`、GPU 调度参数和 `VLLM_BASE_URL`。
+
+### 运行命令
+
+```bash
+conda activate rm
+pip install -e ".[dev,vllm]"
+python -m pytest
+
+# 不依赖 GPU 的 adapter/evaluator/taxonomy guardrail。
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/failure_taxonomy.json
+
+# 终端 1：启动本地 Qwen/vLLM 服务。
+CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.85 MAX_MODEL_LEN=4096 \
+  bash scripts/start_vllm_qwen35_9b.sh
+
+# 终端 2：真实 actor no-memory scan3。
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+curl http://127.0.0.1:8000/v1/models
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/failure_taxonomy.json
+grep '"event_type": "expected_actions_complete"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs.jsonl
+```
+
+### 配置文件
+
+`configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml`
+
+关键参数：`benchmark.task_split=base`，`benchmark.max_tasks=3`，`benchmark.evaluation=official_like`，`agent.stop_after_expected_actions=true`，`models.actor.provider=vllm`，`models.actor.model=qwen3.5-9b`，`temperature=0.0`，`max_tokens=512`，`response_format=json_object`，`context_overflow_margin_tokens=256`，`logging.save_raw_model_io=true`，`memory_policy=none`。
+
+### 输出目录
+
+`runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/`
+
+### 结果
+
+待填写。建议至少记录：
+
+1. `python -m pytest` 结果。
+2. action-replay scan10 的 `success_rate`、`expected_actions_matched_count`、`failure_taxonomy_primary_types`、`model_parse_error_count`、`truncated_json_response_count`。
+3. no-memory scan3 的 `success_rate`、`expected_actions_matched_count`、`model_parse_error_count`、`truncated_json_response_count`、`failure_taxonomy_primary_types`、`expected_actions_complete_count`。
+4. 逐任务 `failure_taxonomy.json.tasks[*].primary_failure_type`、`error_type`、`expected_actions_complete`、`first_model_parse_error`、`first_action_mismatch`、`communicate_info_passed`、`nl_assertions_passed`。
+
+### 现象与问题
+
+待填写。重点判断：
+
+1. 第七轮 task `1/2` 的长 `thought` 截断是否消失。
+2. 若仍有 parse error，是 `truncated_json_response` 还是普通 `invalid_json_response`。
+3. 若 parser 截断消失但仍失败，失败是否转为 action mismatch、tool planning、communicate/nl assertion 等更有解释力的 taxonomy。
+4. task `2` 是否仍重复调用 `list_all_product_types` 或 `get_user_details`，以及是否仍无法发现/使用正确 product id。
+
+### 下一步
+
+待填写。只有 no-memory scan3 不再出现 parser 截断，且剩余失败能稳定落入 action/tool/communicate/nl taxonomy 后，才运行 `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`。若仍有 `truncated_json_response`，先继续收紧输出协议或尝试临时 `models.actor.response_format=json_schema`，不进入 memory 对照。

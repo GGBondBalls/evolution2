@@ -23,6 +23,7 @@ def summarize_failure_taxonomy(output_dir: str | Path) -> dict[str, Any]:
 
     event_counts_by_task: dict[str, Counter[str]] = defaultdict(Counter)
     last_model_decision_by_task: dict[str, dict[str, Any]] = {}
+    first_model_parse_error_by_task: dict[str, dict[str, Any]] = {}
     for record in trace_records:
         task_id = str(record.get("task_id") or "")
         event_type = str(record.get("event_type") or "")
@@ -31,6 +32,8 @@ def summarize_failure_taxonomy(output_dir: str | Path) -> dict[str, Any]:
         event_counts_by_task[task_id][event_type] += 1
         if event_type == "model_decision":
             last_model_decision_by_task[task_id] = record
+        elif event_type == "model_parse_error" and task_id not in first_model_parse_error_by_task:
+            first_model_parse_error_by_task[task_id] = record
 
     task_summaries = []
     primary_failure_counts: Counter[str] = Counter()
@@ -67,6 +70,7 @@ def summarize_failure_taxonomy(output_dir: str | Path) -> dict[str, Any]:
                 primary_failure=primary_failure,
                 event_counts=event_counts,
                 last_model_decision=last_model_decision_by_task.get(task_id),
+                first_model_parse_error=first_model_parse_error_by_task.get(task_id),
             )
         )
 
@@ -105,6 +109,9 @@ def failure_taxonomy_metric_summary(summary: dict[str, Any]) -> dict[str, Any]:
         ),
         "model_action_repair_count": int(trace_counts.get("model_action_repair") or 0),
         "model_parse_error_count": int(trace_counts.get("model_parse_error") or 0),
+        "truncated_json_response_count": int(
+            primary_counts.get("truncated_json_response") or 0
+        ),
     }
 
 
@@ -114,6 +121,7 @@ def _task_summary(
     primary_failure: str,
     event_counts: Counter[str],
     last_model_decision: dict[str, Any] | None,
+    first_model_parse_error: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "task_id": str(record.get("task_id") or ""),
@@ -153,6 +161,7 @@ def _task_summary(
             details.get("tool_observation_errors")
         ),
         "last_model_decision": _model_decision_summary(last_model_decision),
+        "first_model_parse_error": _model_parse_error_summary(first_model_parse_error),
     }
 
 
@@ -165,6 +174,8 @@ def _primary_failure_type(
     if success:
         return "success"
     if event_counts.get("model_parse_error", 0) > 0:
+        if error_type == "truncated_json_response":
+            return "truncated_json_response"
         return "model_parse_error"
     if error_type:
         return error_type
@@ -199,6 +210,29 @@ def _model_decision_summary(record: dict[str, Any] | None) -> dict[str, Any] | N
         "raw_response_available": raw_response_text is not None,
         "raw_response_chars": len(raw_response_text) if raw_response_text is not None else 0,
         "raw_response_excerpt": _excerpt(raw_response_text),
+    }
+
+
+def _model_parse_error_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    raw_response = record.get("raw_response")
+    raw_response_text = raw_response if isinstance(raw_response, str) else None
+    return {
+        "step": record.get("step"),
+        "error_type": record.get("error_type"),
+        "parse_error": record.get("parse_error"),
+        "json_error": record.get("json_error"),
+        "json_error_pos": record.get("json_error_pos"),
+        "raw_response_available": raw_response_text is not None,
+        "raw_response_chars": len(raw_response_text) if raw_response_text is not None else 0,
+        "raw_response_excerpt": _excerpt(raw_response_text),
+        "starts_with_json_object": record.get("starts_with_json_object"),
+        "unclosed_json_object": record.get("unclosed_json_object"),
+        "completion_tokens": record.get("completion_tokens"),
+        "max_tokens": record.get("max_tokens"),
+        "finish_reason": record.get("finish_reason"),
+        "token_budget_hit": record.get("token_budget_hit"),
     }
 
 
