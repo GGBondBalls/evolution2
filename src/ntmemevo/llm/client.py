@@ -668,6 +668,8 @@ def _reduce_max_tokens_for_context_overflow(
     context_window = int(match.group(1))
     prompt_tokens = int(match.group(3))
     adjusted_max_tokens = context_window - prompt_tokens - margin_tokens
+    if adjusted_max_tokens < 1 and margin_tokens > 0:
+        adjusted_max_tokens = context_window - prompt_tokens - 1
     if adjusted_max_tokens < 1 or adjusted_max_tokens >= current_max_tokens:
         return None
 

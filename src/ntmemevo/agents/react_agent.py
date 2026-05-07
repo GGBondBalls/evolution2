@@ -58,6 +58,7 @@ class ReActToolAgent(Agent):
             start_task(task)
 
         observations: list[str] = []
+        prompt_observations: list[tuple[str, str]] = []
         trace_summary: list[str] = []
         memories = memories or []
         prompt_tokens = 0
@@ -67,7 +68,12 @@ class ReActToolAgent(Agent):
         error_type: str | None = None
 
         for step in range(1, self.max_steps + 1):
-            messages = self._build_messages(task, env, observations, memories)
+            messages = self._build_messages(
+                task,
+                env,
+                [item[1] for item in prompt_observations],
+                memories,
+            )
             max_tokens = int(self.model_config.get("max_tokens", 1024))
             response = self.llm.complete(
                 messages=messages,
@@ -168,6 +174,11 @@ class ReActToolAgent(Agent):
             result = env.call_tool(tool_name, args)
             tool_calls += 1
             observations.append(result.observation)
+            _upsert_prompt_observation(
+                prompt_observations,
+                key=_prompt_observation_key(result),
+                text=_compact_tool_observation_for_prompt(result),
+            )
             trace_summary.append(f"{result.tool_name}({result.args}) -> {result.observation}")
             trace_logger.log_event(
                 task_id=task.task_id,
@@ -496,3 +507,144 @@ def _extract_finish_reason(raw: dict[str, Any]) -> str | None:
             if reason is not None:
                 return str(reason)
     return None
+
+
+def _prompt_observation_key(result: Any) -> str:
+    return json.dumps(
+        {
+            "tool_name": getattr(result, "tool_name", ""),
+            "args": getattr(result, "args", {}),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _upsert_prompt_observation(
+    observations: list[tuple[str, str]],
+    key: str,
+    text: str,
+) -> None:
+    for index, (existing_key, _) in enumerate(observations):
+        if existing_key == key:
+            observations[index] = (key, text)
+            return
+    observations.append((key, text))
+
+
+def _compact_tool_observation_for_prompt(result: Any) -> str:
+    tool_name = str(getattr(result, "tool_name", "") or "")
+    args = getattr(result, "args", {})
+    observation = str(getattr(result, "observation", "") or "")
+    prefix = f"{tool_name}({json.dumps(args, ensure_ascii=False, sort_keys=True)}) -> "
+    if not observation.strip().startswith("{"):
+        return prefix + _truncate_text(observation, 900)
+
+    try:
+        record = json.loads(observation)
+    except json.JSONDecodeError:
+        return prefix + _truncate_text(observation, 900)
+    if not isinstance(record, dict):
+        return prefix + _truncate_text(observation, 900)
+
+    if tool_name == "get_product_details":
+        compact = _compact_product_record(record)
+    elif tool_name == "get_order_details":
+        compact = _compact_order_record(record)
+    elif tool_name == "get_user_details":
+        compact = _compact_user_record(record)
+    else:
+        compact = _truncate_text(
+            json.dumps(record, ensure_ascii=False, sort_keys=True),
+            900,
+        )
+    return prefix + compact
+
+
+def _compact_product_record(record: dict[str, Any]) -> str:
+    variants = record.get("variants")
+    if not isinstance(variants, dict):
+        return _truncate_text(json.dumps(record, ensure_ascii=False, sort_keys=True), 900)
+
+    available = []
+    unavailable_count = 0
+    for item_id, raw_variant in sorted(variants.items()):
+        if not isinstance(raw_variant, dict):
+            continue
+        variant = dict(raw_variant)
+        variant.setdefault("item_id", item_id)
+        entry = _compact_variant_entry(variant)
+        if bool(variant.get("available")):
+            available.append(entry)
+        else:
+            unavailable_count += 1
+
+    return (
+        f"product_id={record.get('product_id')}; name={record.get('name')}; "
+        f"variants_total={len(variants)}; available_count={len(available)}; "
+        f"available_variants=[{'; '.join(available)}]; "
+        f"unavailable_count={unavailable_count}"
+    )
+
+
+def _compact_order_record(record: dict[str, Any]) -> str:
+    items = record.get("items")
+    compact_items = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            compact_items.append(
+                (
+                    f"item_id={item.get('item_id')}; name={item.get('name')}; "
+                    f"product_id={item.get('product_id')}; options={_compact_options(item.get('options'))}; "
+                    f"price={item.get('price')}"
+                )
+            )
+    payment_ids = []
+    payment_history = record.get("payment_history")
+    if isinstance(payment_history, list):
+        for payment in payment_history:
+            if isinstance(payment, dict) and payment.get("payment_method_id") is not None:
+                payment_ids.append(str(payment.get("payment_method_id")))
+    return (
+        f"order_id={record.get('order_id')}; status={record.get('status')}; "
+        f"user_id={record.get('user_id')}; payment_method_ids={payment_ids}; "
+        f"items=[{'; '.join(compact_items)}]"
+    )
+
+
+def _compact_user_record(record: dict[str, Any]) -> str:
+    order_ids = record.get("orders") or record.get("order_ids")
+    if isinstance(order_ids, dict):
+        order_ids = list(order_ids)
+    if not isinstance(order_ids, list):
+        order_ids = []
+    payment_methods = record.get("payment_methods")
+    payment_ids = list(payment_methods) if isinstance(payment_methods, dict) else []
+    return (
+        f"user_id={record.get('user_id') or record.get('id')}; "
+        f"name={record.get('name')}; email={record.get('email')}; "
+        f"order_ids={order_ids}; payment_method_ids={payment_ids}"
+    )
+
+
+def _compact_variant_entry(variant: dict[str, Any]) -> str:
+    return (
+        f"item_id={variant.get('item_id')}; "
+        f"options={_compact_options(variant.get('options'))}; "
+        f"price={variant.get('price')}"
+    )
+
+
+def _compact_options(value: Any) -> str:
+    if isinstance(value, dict):
+        return ",".join(f"{key}={value[key]}" for key in sorted(value))
+    return str(value or "")
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 3] + "..."

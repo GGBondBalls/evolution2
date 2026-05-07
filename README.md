@@ -417,8 +417,10 @@ pytest
 Phase two round eight hardens the local Qwen/vLLM real actor before any
 memory-method comparison. The code now asks for compact JSON decisions with an
 empty or very short `thought`, adds retail tool-use guardrails, exposes an
-opt-in JSON schema response format, and splits token-budget truncation from
-generic invalid JSON. The next milestone is experimental validation:
+opt-in JSON schema response format, compresses prompt-only tool observations,
+deduplicates repeated tool observations by `tool_name + args`, and splits
+token-budget truncation from generic invalid JSON. The next milestone is
+experimental validation:
 
 1. Keep `configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` as
    the adapter/evaluator/failure-taxonomy compatibility guardrail.

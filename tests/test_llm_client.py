@@ -188,3 +188,81 @@ def test_vllm_client_reduces_max_tokens_after_context_overflow() -> None:
     assert len(requests) == 2
     assert requests[0]["max_tokens"] == 1536
     assert requests[1]["max_tokens"] == 1407
+
+
+def test_vllm_client_reduces_max_tokens_when_margin_is_too_large() -> None:
+    requests: list[dict[str, object]] = []
+
+    def fake_urlopen(request: object, timeout: float) -> _FakeHTTPResponse:
+        del timeout
+        payload = json.loads(getattr(request, "data").decode("utf-8"))
+        requests.append(payload)
+        if len(requests) == 1:
+            error_body = json.dumps(
+                {
+                    "error": {
+                        "message": (
+                            "This model's maximum context length is 4096 tokens. "
+                            "However, you requested 255 output tokens and your prompt "
+                            "contains at least 3842 input tokens, for a total of at least "
+                            "4097 tokens."
+                        ),
+                        "type": "BadRequestError",
+                        "param": "input_tokens",
+                    }
+                }
+            )
+            raise urllib.error.HTTPError(
+                url="http://127.0.0.1:8000/v1/chat/completions",
+                code=400,
+                msg="Bad Request",
+                hdrs=None,
+                fp=_FakeHTTPErrorBody(error_body),
+            )
+        return _FakeHTTPResponse(
+            {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": payload["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"final","answer":"ok"}',
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3842,
+                    "completion_tokens": 12,
+                    "total_tokens": 3854,
+                },
+            }
+        )
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        client = create_llm_client(
+            {
+                "provider": "vllm",
+                "model": "qwen3.5-9b",
+                "base_url": "http://127.0.0.1:8000/v1",
+                "api_key": "EMPTY",
+                "healthcheck": False,
+                "request_retries": 1,
+                "retry_sleep_seconds": 0,
+                "context_overflow_margin_tokens": 256,
+            }
+        )
+
+        response = client.complete(
+            messages=[ChatMessage(role="user", content="Return JSON.")],
+            max_tokens=255,
+            response_format={"type": "json_object"},
+        )
+
+    assert json.loads(response.content) == {"action": "final", "answer": "ok"}
+    assert len(requests) == 2
+    assert requests[0]["max_tokens"] == 255
+    assert requests[1]["max_tokens"] == 253

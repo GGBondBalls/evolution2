@@ -1384,7 +1384,7 @@ def test_phase2_real_actor_scan_configs_preserve_protocol_hardening_baseline() -
     assert nomem.agent["stop_after_expected_actions"] is True
     assert nomem.models["actor"]["provider"] == "vllm"
     assert nomem.models["actor"]["temperature"] == 0.0
-    assert nomem.models["actor"]["max_tokens"] == 512
+    assert nomem.models["actor"]["max_tokens"] == 256
     assert nomem.models["actor"]["response_format"] == "json_object"
     assert nomem.models["actor"]["context_overflow_margin_tokens"] == 256
     assert nomem.logging["save_raw_model_io"] is True
@@ -1396,7 +1396,7 @@ def test_phase2_real_actor_scan_configs_preserve_protocol_hardening_baseline() -
     assert raw_trace.agent["memory_top_k"] == 2
     assert raw_trace.agent["stop_after_expected_actions"] is True
     assert raw_trace.models["actor"]["provider"] == "vllm"
-    assert raw_trace.models["actor"]["max_tokens"] == 512
+    assert raw_trace.models["actor"]["max_tokens"] == 256
     assert raw_trace.models["actor"]["response_format"] == "json_object"
     assert raw_trace.raw["memory"]["method"] == "raw_trace_rag"
     assert raw_trace.raw["memory"]["top_k"] == 2

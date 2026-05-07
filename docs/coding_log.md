@@ -2194,3 +2194,78 @@ cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_json_schema_seed
 1. 用户先运行 no-memory scan3，确认第七轮的 `model_parse_error/invalid_json_response` 是否转为 0，或被细分为 `truncated_json_response`。
 2. 若 no-memory scan3 仍存在 `truncated_json_response`，继续收紧 prompt 或尝试 `response_format: json_schema` / vLLM guided JSON；暂不运行 raw-trace-rag。
 3. 若 no-memory scan3 无 parser 截断，再运行 raw-trace-rag scan3 做日志形态对照；比较 `avg_prompt_tokens`、`model_parse_error_count`、`truncated_json_response_count`、`expected_actions_matched_count` 和 `failure_taxonomy_primary_types`。
+
+第八轮用户复验 hotfix：
+
+1. 用户复跑 no-memory scan3 时，vLLM 仍报 context overflow：第一次请求为 `prompt contains at least 3585 input tokens` + `512 output tokens`，自动降额后仍出现 `prompt contains at least 3842 input tokens` + `255 output tokens`，最终实验端抛出 `vllm request failed after 3 attempt(s)`。
+2. 根因不是 vLLM 服务不可用，而是 task `1` 已经把 `get_order_details`、`get_product_details(1656367028)`、`get_product_details(4896585277)` 和重复 `get_product_details(1656367028)` 的完整 JSON observation 全部塞回下一轮 prompt；输出预算再降也无法稳定留出空间。
+3. 修改 `ReActToolAgent`：完整 observation 继续写入 `trace_events.jsonl` 与 `trace_summary`，但传回模型的历史 observation 改为 prompt-only 压缩摘要；`get_product_details` 压缩为 product id/name、variant 总数、available count、available variants 和 unavailable count；`get_order_details` 压缩为 order id/status/user id/payment ids/items；`get_user_details` 压缩为 user/order/payment 摘要。
+4. Prompt observation 按 `tool_name + args` 去重；同一工具同一参数重复调用时，新的压缩 observation 替换旧条目，不再累计重复的大块上下文。
+5. 修改 `OpenAICompatibleChatClient` 的 context overflow 降额策略：当配置的 `context_overflow_margin_tokens` 过大导致计算出的新 `max_tokens < 1` 时，退回到 `context_window - prompt_tokens - 1`，例如 `prompt=3842`、`current max_tokens=255` 时可继续降到 `253` 并重试，而不是直接失败。
+6. 三个真实 actor 配置进一步把 `models.actor.max_tokens` 从 `512` 收紧为 `256`，减少首次请求撞 4096 context window 的概率；单步 JSON tool decision 正常应远小于该预算。
+7. 新增测试覆盖大 product observation 的 prompt 压缩与重复 observation 去重，以及 margin 过大时 vLLM context overflow 继续降额重试。
+8. 验证记录：`conda run -n rm python -m py_compile src/ntmemevo/agents/react_agent.py src/ntmemevo/llm/client.py tests/test_react_agent.py tests/test_llm_client.py` 通过；`conda run -n rm python -m pytest tests/test_react_agent.py tests/test_llm_client.py -q` 通过：`10 passed in 0.03s`；scan3 配置字段测试通过：`1 passed in 0.04s`。
+
+hotfix 后请用户重新运行：
+
+```bash
+conda activate rm
+python -m pytest
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+curl http://127.0.0.1:8000/v1/models
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/failure_taxonomy.json
+```
+
+第八轮用户复验更新：
+
+1. 用户在 `(rm)` 环境、`BNUZ` 机器上复跑 `python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml`，本次 no-memory scan3 完成但 3 个任务均失败。
+2. 核心指标：`num_tasks=3`、`success_rate=0.0`、`avg_steps=16.0`、`avg_tool_calls=16.0`、`avg_prompt_tokens=23380.666666666668`、`avg_completion_tokens=1019.0`、`expected_actions_matched_count=0`、`expected_actions_failed_count=3`。
+3. failure taxonomy：`failure_taxonomy_primary_types={"max_steps_exceeded": 3}`、`evaluator_error_types={"max_steps_exceeded": 3}`、`expected_actions_complete_count=0`、`model_action_repair_count=0`、`model_parse_error_count=0`、`truncated_json_response_count=0`。
+4. 第七轮的 parser/截断失败没有复现：`trace_events.jsonl` 中没有 `model_parse_error`，没有 `truncated_json_response`，没有 `model_action_repair`；raw response 均为可审计短 JSON，`repair_status=not_needed`。
+5. task `0/1` 的主要问题从 JSON 输出协议转为重复动作循环：模型在 `find_user_id_by_name_zip -> get_user_details -> get_order_details -> get_product_details(1656367028)` 后，持续重复 `get_product_details(1656367028)`，没有转向 thermostat product `4896585277` 或最终 exchange tool。
+6. task `2` 的主要问题是 product lookup 可发现性与循环：模型先调用 `list_all_product_types` 得到 `product_types=unknown`，随后调用 `get_product_details({"product_id":"unknown"})` 触发 1 条 `tool_semantic_error`，再反复 `list_all_product_types` 直到 `max_steps_exceeded`；communicate/nl 断言中期望告知 `10` 个 t-shirt options，实际未满足。
+7. `docs/experiment_log.md` 已将 `tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1 第八轮输出协议加固复验` 从待填更新为完成记录，并明确 raw-trace-rag scan3 继续暂缓。
+
+第八轮实验结论：
+
+1. 第八轮编码目标中的 parser/output-control 与 prompt context 压缩可以按局部目标验收：本次 scan3 不再失败于 invalid JSON、truncated JSON 或 vLLM context overflow。
+2. no-memory real actor 基线仍不能进入 memory 方法对照，因为所有任务都打满 16 步，失败主因是重复工具调用、未能从 product variants 中归纳下一步动作，以及 task `2` 的 product id 发现路径不足。
+3. 当前 `success_rate=0.0` 不能解释为 memory 方法空间，也不能归因为负迁移；它是基础 real actor 行为控制尚未稳定。
+4. 不建议运行 `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`；raw trace 注入会增加 prompt 成本，并可能把 no-memory 已存在的循环和 action mismatch 混入 memory 对照。
+
+## 第二阶段第九轮方向
+
+优先方向：真实 actor 重复动作控制、product lookup 可发现性和更细 failure taxonomy。理由是第八轮已经把 parse/context 类失败压下去，但 no-memory scan3 暴露出 3 个任务全部 `max_steps_exceeded`，必须先让失败从宽泛的“打满步数”变成可定位的 action/tool/planning taxonomy，才能恢复 raw-trace-rag 小样本准入。
+
+第九轮建议范围：
+
+1. 在 `ReActToolAgent` 或 prompt 层加入重复工具调用 guardrail：同一 `tool_name + args` 连续返回相同 observation 后，模型必须转向下一项检查、给最终答案，或在可安全时停止。
+2. 在 trace/taxonomy 中记录重复动作摘要，例如 `repeated_tool_call_loop`、重复 key、首次重复步数、连续重复次数和是否导致 `max_steps_exceeded`。
+3. 针对 task `0/1` 优化 product variant 压缩摘要：对 `get_product_details(1656367028)` 显式摘要可用/不可用约束匹配结果，帮助模型判断 `RGB/full size/clicky` 不可用、fallback `no backlight/full size/clicky` 可用，并继续检查 thermostat product `4896585277`。
+4. 针对 task `2` 明确 product lookup 策略：如果官方 tau2 retail 没有可用的 product type search，需补足 adapter 侧索引/工具说明，或者在 prompt 中明确 `list_all_product_types` 的返回边界，避免模型用 `product_id=unknown`。
+5. 增强 failure taxonomy，将 `max_steps_exceeded` 下的循环、unknown product lookup、重复 user/order/product 查询拆出，便于判断下一次 no-memory scan3 是否真正变好。
+6. 保持 action-replay scan10 作为 adapter/evaluator guardrail；第九轮任意 prompt/tool/taxonomy 改动后都要先确认 `expected_actions_matched_count=10` 和 `truncated_json_response_count=0` 不回归。
+7. 第九轮复验仍只跑 no-memory scan3。只有 `model_parse_error_count=0`、`truncated_json_response_count=0` 继续为 0，且 `max_steps_exceeded` 循环显著减少或被更细 taxonomy 解释后，才运行 raw-trace-rag scan3。
+
+第九轮建议复验命令：
+
+```bash
+conda activate rm
+python -m pytest
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/failure_taxonomy.json
+
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+curl http://127.0.0.1:8000/v1/models
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/failure_taxonomy.json
+grep '"event_type": "expected_actions_complete"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs.jsonl
+```

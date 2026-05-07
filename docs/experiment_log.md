@@ -2998,7 +2998,7 @@ tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3_se
 
 ### 日期与环境
 
-待填写。应记录 Linux 机器、conda 环境 `rm`、Python 版本、pytest 版本、本地 vLLM 模型名、`max_model_len`、GPU 调度参数和 `VLLM_BASE_URL`。
+2026-05-07，Linux 机器 `BNUZ`，交互式 conda 环境 `(rm)`。本次用户提供结果未附 `python --version`、`pytest` 版本或 `curl /v1/models` 原始输出；按配置记录本轮真实 actor 为本地 OpenAI-compatible vLLM 服务上的 `qwen3.5-9b`，`VLLM_BASE_URL=http://127.0.0.1:8000/v1`，配置侧 `max_tokens=256`、`response_format=json_object`、`context_overflow_margin_tokens=256`。
 
 ### 运行命令
 
@@ -3033,7 +3033,7 @@ tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs
 
 `configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml`
 
-关键参数：`benchmark.task_split=base`，`benchmark.max_tasks=3`，`benchmark.evaluation=official_like`，`agent.stop_after_expected_actions=true`，`models.actor.provider=vllm`，`models.actor.model=qwen3.5-9b`，`temperature=0.0`，`max_tokens=512`，`response_format=json_object`，`context_overflow_margin_tokens=256`，`logging.save_raw_model_io=true`，`memory_policy=none`。
+关键参数：`benchmark.task_split=base`，`benchmark.max_tasks=3`，`benchmark.evaluation=official_like`，`agent.stop_after_expected_actions=true`，`models.actor.provider=vllm`，`models.actor.model=qwen3.5-9b`，`temperature=0.0`，`max_tokens=256`，`response_format=json_object`，`context_overflow_margin_tokens=256`，`logging.save_raw_model_io=true`，`memory_policy=none`。
 
 ### 输出目录
 
@@ -3041,22 +3041,100 @@ tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs
 
 ### 结果
 
-待填写。建议至少记录：
+本次用户提供的复验输出只包含 no-memory scan3 实验结果与日志抽查；未提供同次 `python -m pytest` 或 action-replay scan10 输出。第八轮编码阶段已有本地验证记录：`python -m pytest -q` 为 `47 passed in 0.15s`，action-replay scan10 为 `success_rate=1.0`、`expected_actions_matched_count=10`、`failure_taxonomy_primary_types={"success": 10}`、`model_parse_error_count=0`、`truncated_json_response_count=0`。
 
-1. `python -m pytest` 结果。
-2. action-replay scan10 的 `success_rate`、`expected_actions_matched_count`、`failure_taxonomy_primary_types`、`model_parse_error_count`、`truncated_json_response_count`。
-3. no-memory scan3 的 `success_rate`、`expected_actions_matched_count`、`model_parse_error_count`、`truncated_json_response_count`、`failure_taxonomy_primary_types`、`expected_actions_complete_count`。
-4. 逐任务 `failure_taxonomy.json.tasks[*].primary_failure_type`、`error_type`、`expected_actions_complete`、`first_model_parse_error`、`first_action_mismatch`、`communicate_info_passed`、`nl_assertions_passed`。
+真实 Qwen/vLLM no-memory scan3 核心指标：
+
+```json
+{
+  "num_tasks": 3,
+  "success_rate": 0.0,
+  "avg_reward": 0.0,
+  "avg_steps": 16.0,
+  "avg_prompt_tokens": 23380.666666666668,
+  "avg_completion_tokens": 1019.0,
+  "avg_tool_calls": 16.0,
+  "evaluation_modes": {
+    "official_like": 3
+  },
+  "expected_actions_evaluated_count": 3,
+  "expected_actions_matched_count": 0,
+  "expected_actions_failed_count": 3,
+  "policy_violation_count": 0,
+  "tool_observation_error_count": 1,
+  "expected_negative_observation_count": 0,
+  "tool_semantic_error_count": 1,
+  "communicate_info_evaluated_count": 1,
+  "communicate_info_passed_count": 0,
+  "nl_assertion_evaluated_count": 1,
+  "nl_assertion_passed_count": 0,
+  "unsupported_official_criteria_count": 0,
+  "evaluator_error_types": {
+    "max_steps_exceeded": 3
+  },
+  "failure_taxonomy_primary_types": {
+    "max_steps_exceeded": 3
+  },
+  "expected_actions_complete_count": 0,
+  "model_action_repair_count": 0,
+  "model_parse_error_count": 0,
+  "truncated_json_response_count": 0
+}
+```
+
+memory/replay/verification/gate 指标均为 0 或空集合，符合 no-memory 配置：`memory_policy=none`、`memory_size=0`、`memory_top_k=0`、`gate_decision_count=0`、`utility_update_count=0`、`replay_result_count=0`、`verification_count=0`。
+
+逐任务 taxonomy：
+
+1. task `0` 失败：`primary_failure_type=max_steps_exceeded`、`expected_actions_matched=false`、`expected_action_count=5`、`actual_action_count=16`、`expected_actions_complete=false`、`first_model_parse_error=null`。模型前 3 步为 `find_user_id_by_name_zip -> get_user_details -> get_order_details`，第 4 步调用 `get_product_details(1656367028)` 后，持续重复 `get_product_details(1656367028)`，没有转向 `get_product_details(4896585277)` 或 `exchange_delivered_order_items`。
+2. task `1` 失败：`primary_failure_type=max_steps_exceeded`、`expected_actions_matched=false`、`expected_action_count=5`、`actual_action_count=16`、`expected_actions_complete=false`、`first_model_parse_error=null`。行为与 task `0` 类似：模型在确认 keyboard product 后反复检查 `get_product_details(1656367028)`，没有根据“若 RGB/full-size/clicky 不可用则只交换 thermostat”的条件转向 thermostat product 或最终 exchange tool。
+3. task `2` 失败：`primary_failure_type=max_steps_exceeded`、`expected_actions_matched=false`、`expected_action_count=11`、`actual_action_count=16`、`expected_actions_complete=false`、`communicate_info_passed=false`、`nl_assertions_passed=false`。模型在 `find_user_id_by_name_zip` 与 `get_user_details` 后调用 `list_all_product_types`，随后尝试 `get_product_details({"product_id":"unknown"})`，触发 1 条 `tool_semantic_error` / `tool_observation_error`；之后反复调用 `list_all_product_types`，没有发现或使用官方期望的 tshirt product ids `6086499569`、`9523456873`，也没有告知 `10` 个 t-shirt options。
+
+trace 抽查：
+
+1. `trace_events.jsonl` 中没有 `expected_actions_complete`，说明第六轮 stop-after-expected-actions 机制没有触发；原因是实际 action sequence 从早期就偏离 expected actions，并且后续重复调用导致 action count 变为 16。
+2. 没有 `model_action_repair`，没有 `model_parse_error`，没有 `truncated_json_response`；所有最后一条 `model_decision` 的 `repair_status` 均为 `not_needed`。
+3. task `0/1` 的最后决策均为 `get_product_details({"product_id":"1656367028"})`，raw response 是合法短 JSON；task `2` 的最后决策为 `list_all_product_types({})`，raw response 也是合法短 JSON。
 
 ### 现象与问题
 
-待填写。重点判断：
+本次实验给出四个结论：
 
-1. 第七轮 task `1/2` 的长 `thought` 截断是否消失。
-2. 若仍有 parse error，是 `truncated_json_response` 还是普通 `invalid_json_response`。
-3. 若 parser 截断消失但仍失败，失败是否转为 action mismatch、tool planning、communicate/nl assertion 等更有解释力的 taxonomy。
-4. task `2` 是否仍重复调用 `list_all_product_types` 或 `get_user_details`，以及是否仍无法发现/使用正确 product id。
+1. 第七轮 task `1/2` 的长 `thought` 截断问题在本次结果中没有复现：`model_parse_error_count=0`、`truncated_json_response_count=0`，且 raw response 均为可解析 JSON object。第八轮输出协议收紧、prompt-only observation 压缩和 context overflow 降额 hotfix 达到了“消除 parser/context 失败”的局部目标。
+2. 失败主因已经下沉为真实 actor 的工具规划、重复动作和终止控制：3 个任务全部达到 `agent.max_steps=16`，`failure_taxonomy_primary_types={"max_steps_exceeded": 3}`。这比第七轮的 `model_parse_error` 更可审计，但仍不是可进入 memory 对照的稳定 no-memory 基线。
+3. task `0/1` 暴露出重复工具调用问题：模型已经拿到 keyboard variants，却不能基于 observation 归纳“RGB/full-size/clicky 不可用”并继续 thermostat 检查或 exchange 决策，而是无限重复同一个 `get_product_details(1656367028)`。
+4. task `2` 暴露出 product lookup 可发现性问题：`list_all_product_types` 只返回 `product_types=unknown`，模型随后使用 `product_id=unknown` 并继续循环。该问题伴随 `tool_semantic_error_count=1`、`communicate_info_passed=false` 和 `nl_assertions_passed=false`，说明当前 adapter/tool 提示不足以让真实 actor 找到 tshirt product ids 并完成退货流程。
+
+因此，本次结果不能解释为 memory 方法失败或负迁移。它说明 no-memory real actor 的基础行为控制仍未稳定；如果此时运行 raw-trace-rag，新增记忆上下文很可能把循环、action mismatch 或 token 成本问题混在一起，无法形成清晰方法对照。
 
 ### 下一步
 
-待填写。只有 no-memory scan3 不再出现 parser 截断，且剩余失败能稳定落入 action/tool/communicate/nl taxonomy 后，才运行 `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`。若仍有 `truncated_json_response`，先继续收紧输出协议或尝试临时 `models.actor.response_format=json_schema`，不进入 memory 对照。
+本轮实验部分建议到此收束，不继续运行 `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml`。下一轮应优先处理 no-memory real actor 的重复动作与 product lookup 可发现性，再复跑同一 scan3。
+
+第九轮建议方向：
+
+1. 在 `ReActToolAgent` 或 prompt 层加入重复工具调用 guardrail：同一 `tool_name + args` 连续返回相同 observation 后，模型必须转向下一项检查、给最终答案，或在可安全时停止；至少要把重复调用作为 trace/taxonomy 字段记录出来。
+2. 针对 task `0/1`，加强 product variant observation 的摘要表达，显式暴露“没有 available variant 同时满足 RGB/full-size/clicky；fallback candidate 为 no backlight/full size/clicky `7706410293`”，并提示检查 thermostat product `4896585277` 后再调用 exchange tool。
+3. 针对 task `2`，补足 retail product lookup 策略：要么提供可用的 product type -> product id 查询工具/索引，要么在工具描述中明确 `list_all_product_types` 的边界并提供 `get_product_details` 可用 product ids 的发现路径；否则模型会继续卡在 `product_types=unknown`。
+4. 扩展 failure taxonomy：新增 `repeated_tool_call_loop`、`unknown_product_lookup_loop` 或等价分类，避免所有此类失败都只落到宽泛的 `max_steps_exceeded`。
+5. 第九轮复验仍先跑 no-memory scan3；只有 `model_parse_error_count=0`、`truncated_json_response_count=0` 保持为 0，并且 `max_steps_exceeded` 循环显著减少或被更细 taxonomy 解释后，才考虑 raw-trace-rag scan3。
+
+建议复验命令：
+
+```bash
+conda activate rm
+python -m pytest
+
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/failure_taxonomy.json
+
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+curl http://127.0.0.1:8000/v1/models
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/failure_taxonomy.json
+grep '"event_type": "expected_actions_complete"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs.jsonl
+```

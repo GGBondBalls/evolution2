@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ntmemevo.agents.react_agent import ReActToolAgent
@@ -66,6 +67,43 @@ class _OneToolEnv(AgentEnv):
     def expected_actions_completed(self, task: Task) -> bool:
         del task
         return self.complete_after_calls is not None and len(self.calls) >= self.complete_after_calls
+
+
+class _LargeProductEnv(_OneToolEnv):
+    def tool_descriptions(self) -> str:
+        return "get_product_details(product_id: str) -> product variants"
+
+    def call_tool(self, tool_name: str, args: dict[str, Any]) -> ToolResult:
+        self.calls.append((tool_name, args))
+        variants = {
+            f"item_{index}": {
+                "item_id": f"item_{index}",
+                "available": index % 2 == 0,
+                "options": {
+                    "color": "black",
+                    "size": f"size_{index}",
+                    "style": "crew neck",
+                },
+                "price": 10.0 + index,
+                "debug_blob": "x" * 500,
+            }
+            for index in range(8)
+        }
+        return ToolResult(
+            tool_name=tool_name,
+            args=args,
+            observation=(
+                '{"name":"Large Product","product_id":"P1","variants":'
+                + json.dumps(variants)
+                + "}"
+            ),
+            ok=True,
+        )
+
+    def evaluate(self, task: Task, final_answer: str) -> tuple[bool, float, str | None]:
+        del task
+        success = "ok" in final_answer.lower()
+        return success, 1.0 if success else 0.0, None if success else "expected_answer_mismatch"
 
 
 class _CapturingTraceLogger:
@@ -275,3 +313,32 @@ def test_react_agent_classifies_token_budget_truncated_json() -> None:
     assert parse_errors[0]["starts_with_json_object"] is True
     assert parse_errors[0]["unclosed_json_object"] is True
     assert parse_errors[0]["token_budget_hit"] is True
+
+
+def test_react_agent_compacts_and_deduplicates_large_observations_in_prompt() -> None:
+    repeated_tool_response = (
+        '{"thought":"","action":"tool","tool_name":"get_product_details",'
+        '"args":{"product_id":"P1"}}'
+    )
+    llm = _SequenceLLM(
+        [
+            repeated_tool_response,
+            repeated_tool_response,
+            '{"thought":"","action":"final","answer":"ok"}',
+        ]
+    )
+    env = _LargeProductEnv()
+    trace_logger = _CapturingTraceLogger()
+
+    result = ReActToolAgent(
+        llm=llm,
+        model_config={},
+        max_steps=4,
+    ).run(task=_task(), env=env, trace_logger=trace_logger)
+
+    third_prompt = llm.message_history[2][1].content
+    assert result.success is True
+    assert len(env.calls) == 2
+    assert third_prompt.count("variants_total=8; available_count=4;") == 1
+    assert "debug_blob" not in third_prompt
+    assert len(third_prompt) < 2500
