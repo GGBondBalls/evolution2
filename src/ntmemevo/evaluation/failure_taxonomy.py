@@ -11,6 +11,7 @@ TRACE_EVENT_KEYS = (
     "model_action_repair",
     "model_parse_error",
     "expected_actions_complete",
+    "repeated_tool_call_loop",
     "tool_call",
     "scripted_action",
 )
@@ -24,6 +25,7 @@ def summarize_failure_taxonomy(output_dir: str | Path) -> dict[str, Any]:
     event_counts_by_task: dict[str, Counter[str]] = defaultdict(Counter)
     last_model_decision_by_task: dict[str, dict[str, Any]] = {}
     first_model_parse_error_by_task: dict[str, dict[str, Any]] = {}
+    repeated_tool_call_loops_by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in trace_records:
         task_id = str(record.get("task_id") or "")
         event_type = str(record.get("event_type") or "")
@@ -34,6 +36,8 @@ def summarize_failure_taxonomy(output_dir: str | Path) -> dict[str, Any]:
             last_model_decision_by_task[task_id] = record
         elif event_type == "model_parse_error" and task_id not in first_model_parse_error_by_task:
             first_model_parse_error_by_task[task_id] = record
+        elif event_type == "repeated_tool_call_loop":
+            repeated_tool_call_loops_by_task[task_id].append(record)
 
     task_summaries = []
     primary_failure_counts: Counter[str] = Counter()
@@ -54,12 +58,14 @@ def summarize_failure_taxonomy(output_dir: str | Path) -> dict[str, Any]:
         if not isinstance(details, dict):
             details = {}
         event_counts = event_counts_by_task.get(task_id, Counter())
+        repeated_loops = repeated_tool_call_loops_by_task.get(task_id, [])
         trace_event_counts.update(event_counts)
         primary_failure = _primary_failure_type(
             success=success,
             error_type=error_type,
             details=details,
             event_counts=event_counts,
+            repeated_tool_call_loops=repeated_loops,
         )
         primary_failure_counts[primary_failure] += 1
 
@@ -71,6 +77,7 @@ def summarize_failure_taxonomy(output_dir: str | Path) -> dict[str, Any]:
                 event_counts=event_counts,
                 last_model_decision=last_model_decision_by_task.get(task_id),
                 first_model_parse_error=first_model_parse_error_by_task.get(task_id),
+                repeated_tool_call_loops=repeated_loops,
             )
         )
 
@@ -112,6 +119,12 @@ def failure_taxonomy_metric_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "truncated_json_response_count": int(
             primary_counts.get("truncated_json_response") or 0
         ),
+        "repeated_tool_call_loop_count": int(
+            trace_counts.get("repeated_tool_call_loop") or 0
+        ),
+        "unknown_product_lookup_loop_count": int(
+            primary_counts.get("unknown_product_lookup_loop") or 0
+        ),
     }
 
 
@@ -122,7 +135,9 @@ def _task_summary(
     event_counts: Counter[str],
     last_model_decision: dict[str, Any] | None,
     first_model_parse_error: dict[str, Any] | None,
+    repeated_tool_call_loops: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    unknown_product_lookups = _unknown_product_lookup_errors(details)
     return {
         "task_id": str(record.get("task_id") or ""),
         "run_id": str(record.get("run_id") or ""),
@@ -154,6 +169,14 @@ def _task_summary(
         ),
         "event_counts": _selected_event_counts(event_counts),
         "expected_actions_complete": event_counts.get("expected_actions_complete", 0) > 0,
+        "repeated_tool_call_loop_count": int(
+            event_counts.get("repeated_tool_call_loop") or 0
+        ),
+        "first_repeated_tool_call_loop": _first_repeated_loop_summary(
+            repeated_tool_call_loops
+        ),
+        "unknown_product_lookup_count": len(unknown_product_lookups),
+        "first_unknown_product_lookup": _first_item(unknown_product_lookups),
         "first_action_mismatch": _first_item(details.get("action_mismatches")),
         "first_policy_violation": _first_item(details.get("policy_violations")),
         "first_tool_semantic_error": _first_item(details.get("tool_semantic_errors")),
@@ -170,6 +193,7 @@ def _primary_failure_type(
     error_type: str | None,
     details: dict[str, Any],
     event_counts: Counter[str],
+    repeated_tool_call_loops: list[dict[str, Any]],
 ) -> str:
     if success:
         return "success"
@@ -177,6 +201,12 @@ def _primary_failure_type(
         if error_type == "truncated_json_response":
             return "truncated_json_response"
         return "model_parse_error"
+    if error_type == "max_steps_exceeded":
+        if _unknown_product_lookup_errors(details):
+            return "unknown_product_lookup_loop"
+        if repeated_tool_call_loops:
+            return "repeated_tool_call_loop"
+        return "max_steps_exceeded"
     if error_type:
         return error_type
     if int(details.get("policy_violation_count") or 0) > 0:
@@ -234,6 +264,47 @@ def _model_parse_error_summary(record: dict[str, Any] | None) -> dict[str, Any] 
         "finish_reason": record.get("finish_reason"),
         "token_budget_hit": record.get("token_budget_hit"),
     }
+
+
+def _first_repeated_loop_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not records:
+        return None
+    record = records[0]
+    return {
+        "step": record.get("step"),
+        "tool_name": record.get("tool_name"),
+        "tool_args": record.get("tool_args"),
+        "first_step": record.get("first_step"),
+        "current_step": record.get("current_step"),
+        "same_call_run_length": record.get("same_call_run_length"),
+        "consecutive_repeat_count": record.get("consecutive_repeat_count"),
+        "observation_hash": record.get("observation_hash"),
+        "observation_excerpt": _excerpt(
+            record.get("observation_excerpt")
+            if isinstance(record.get("observation_excerpt"), str)
+            else None
+        ),
+    }
+
+
+def _unknown_product_lookup_errors(details: dict[str, Any]) -> list[dict[str, Any]]:
+    errors = details.get("tool_semantic_errors") or []
+    if not isinstance(errors, list):
+        return []
+    unknown_errors: list[dict[str, Any]] = []
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        if str(error.get("tool_name") or "") != "get_product_details":
+            continue
+        args = error.get("args") or {}
+        product_id = ""
+        if isinstance(args, dict):
+            product_id = str(args.get("product_id") or args.get("id") or "").strip()
+        observation = str(error.get("observation") or "")
+        if product_id.lower() == "unknown" or "Product unknown was not found" in observation:
+            unknown_errors.append(error)
+    return unknown_errors
 
 
 def _selected_event_counts(event_counts: Counter[str]) -> dict[str, int]:

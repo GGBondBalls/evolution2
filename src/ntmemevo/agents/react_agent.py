@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -59,6 +60,7 @@ class ReActToolAgent(Agent):
 
         observations: list[str] = []
         prompt_observations: list[tuple[str, str]] = []
+        repeat_guardrails: list[tuple[str, str]] = []
         trace_summary: list[str] = []
         memories = memories or []
         prompt_tokens = 0
@@ -66,6 +68,9 @@ class ReActToolAgent(Agent):
         tool_calls = 0
         final_answer = ""
         error_type: str | None = None
+        last_tool_repeat_key: str | None = None
+        last_tool_observation: str | None = None
+        repeated_run_start_step: int | None = None
 
         for step in range(1, self.max_steps + 1):
             messages = self._build_messages(
@@ -73,6 +78,7 @@ class ReActToolAgent(Agent):
                 env,
                 [item[1] for item in prompt_observations],
                 memories,
+                [item[1] for item in repeat_guardrails[-3:]],
             )
             max_tokens = int(self.model_config.get("max_tokens", 1024))
             response = self.llm.complete(
@@ -191,6 +197,41 @@ class ReActToolAgent(Agent):
                     "ok": result.ok,
                 },
             )
+            repeat_key = _repeat_tool_call_key(result)
+            if repeat_key == last_tool_repeat_key and result.observation == last_tool_observation:
+                if repeated_run_start_step is None:
+                    repeated_run_start_step = max(1, step - 1)
+                same_call_run_length = step - repeated_run_start_step + 1
+                guardrail_message = _repeat_guardrail_message(
+                    result=result,
+                    same_call_run_length=same_call_run_length,
+                )
+                _upsert_prompt_observation(
+                    repeat_guardrails,
+                    key=repeat_key,
+                    text=guardrail_message,
+                )
+                trace_logger.log_event(
+                    task_id=task.task_id,
+                    step=step,
+                    event_type="repeated_tool_call_loop",
+                    payload={
+                        "repeat_key": repeat_key,
+                        "tool_name": result.tool_name,
+                        "tool_args": result.args,
+                        "first_step": repeated_run_start_step,
+                        "current_step": step,
+                        "same_call_run_length": same_call_run_length,
+                        "consecutive_repeat_count": same_call_run_length - 1,
+                        "observation_hash": _stable_text_hash(result.observation),
+                        "observation_excerpt": _truncate_text(result.observation, 240),
+                        "guardrail_message": guardrail_message,
+                    },
+                )
+            else:
+                last_tool_repeat_key = repeat_key
+                last_tool_observation = result.observation
+                repeated_run_start_step = step
             expected_actions_completed = getattr(env, "expected_actions_completed", None)
             if (
                 self.stop_after_expected_actions
@@ -238,14 +279,19 @@ class ReActToolAgent(Agent):
         env: AgentEnv,
         observations: list[str],
         memories: list[RetrievedMemory],
+        repeat_guardrails: list[str] | None = None,
     ) -> list[ChatMessage]:
         observation_block = "\n".join(f"Observation: {item}" for item in observations)
+        repeat_guardrails = repeat_guardrails or []
         user_lines = [
             f"Task id: {task.task_id}",
             f"Instruction: {task.instruction}",
         ]
         if memories:
             user_lines.append(self._format_memories(memories))
+        if repeat_guardrails:
+            user_lines.append("Repeat guardrails:")
+            user_lines.extend(f"- {item}" for item in repeat_guardrails)
         user_lines.extend(
             [
                 "Available tools:",
@@ -260,9 +306,11 @@ class ReActToolAgent(Agent):
                 "Keep thought empty or under 8 words. Never copy observations, product variants, IDs lists, or long reasoning into thought.",
                 "If you need more information, call exactly one next tool instead of writing a long analysis.",
                 "Retail tool-use guardrails:",
+                "Do not repeat an identical read-only tool call after it returned the same observation; use the existing observation to choose a different next step.",
+                "For exchange requests involving multiple ordered items, inspect each relevant product once, then call the exchange tool with the selected replacement item ids.",
                 "Use get_product_details(product_id) to inspect product variants; count available variants from the observation without copying the list.",
                 "Use get_item_details(item_id) only for a concrete item id, not for a product id.",
-                "Use list_all_product_types at most once; it returns type names only and does not reveal product ids.",
+                "Use list_all_product_types at most once; it returns a product-name to product-id map for product discovery.",
                 "After get_user_details returns a user, use its order ids with get_order_details; do not repeat the same get_user_details call.",
             ]
         )
@@ -520,6 +568,26 @@ def _prompt_observation_key(result: Any) -> str:
     )
 
 
+def _repeat_tool_call_key(result: Any) -> str:
+    return _prompt_observation_key(result)
+
+
+def _stable_text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _repeat_guardrail_message(result: Any, same_call_run_length: int) -> str:
+    tool_name = str(getattr(result, "tool_name", "") or "")
+    args = getattr(result, "args", {})
+    args_text = json.dumps(args, ensure_ascii=False, sort_keys=True)
+    return (
+        f"{tool_name}({args_text}) returned the same observation "
+        f"{same_call_run_length} consecutive times. Do not call it again with "
+        "identical args; use the existing result, call a different required lookup, "
+        "finish with a final answer, or make a safe write call if all required data is known."
+    )
+
+
 def _upsert_prompt_observation(
     observations: list[tuple[str, str]],
     key: str,
@@ -553,6 +621,8 @@ def _compact_tool_observation_for_prompt(result: Any) -> str:
         compact = _compact_order_record(record)
     elif tool_name == "get_user_details":
         compact = _compact_user_record(record)
+    elif tool_name == "list_all_product_types":
+        compact = _compact_product_type_index(record)
     else:
         compact = _truncate_text(
             json.dumps(record, ensure_ascii=False, sort_keys=True),
@@ -567,6 +637,7 @@ def _compact_product_record(record: dict[str, Any]) -> str:
         return _truncate_text(json.dumps(record, ensure_ascii=False, sort_keys=True), 900)
 
     available = []
+    unavailable = []
     unavailable_count = 0
     for item_id, raw_variant in sorted(variants.items()):
         if not isinstance(raw_variant, dict):
@@ -577,13 +648,15 @@ def _compact_product_record(record: dict[str, Any]) -> str:
         if bool(variant.get("available")):
             available.append(entry)
         else:
+            unavailable.append(entry)
             unavailable_count += 1
 
     return (
         f"product_id={record.get('product_id')}; name={record.get('name')}; "
         f"variants_total={len(variants)}; available_count={len(available)}; "
-        f"available_variants=[{'; '.join(available)}]; "
-        f"unavailable_count={unavailable_count}"
+        f"available_variants=[{_format_variant_entries(available)}]; "
+        f"unavailable_count={unavailable_count}; "
+        f"unavailable_variants=[{_format_variant_entries(unavailable)}]"
     )
 
 
@@ -629,6 +702,13 @@ def _compact_user_record(record: dict[str, Any]) -> str:
     )
 
 
+def _compact_product_type_index(record: dict[str, Any]) -> str:
+    entries = []
+    for name, product_id in sorted(record.items(), key=lambda item: str(item[0]).lower()):
+        entries.append(f"{name}={product_id}")
+    return "product_type_ids={" + "; ".join(entries) + "}"
+
+
 def _compact_variant_entry(variant: dict[str, Any]) -> str:
     return (
         f"item_id={variant.get('item_id')}; "
@@ -641,6 +721,14 @@ def _compact_options(value: Any) -> str:
     if isinstance(value, dict):
         return ",".join(f"{key}={value[key]}" for key in sorted(value))
     return str(value or "")
+
+
+def _format_variant_entries(entries: list[str], max_entries: int = 12) -> str:
+    if len(entries) <= max_entries:
+        return "; ".join(entries)
+    visible = entries[:max_entries]
+    visible.append(f"... +{len(entries) - max_entries} more")
+    return "; ".join(visible)
 
 
 def _truncate_text(text: str, max_chars: int) -> str:

@@ -337,8 +337,21 @@ def test_react_agent_compacts_and_deduplicates_large_observations_in_prompt() ->
     ).run(task=_task(), env=env, trace_logger=trace_logger)
 
     third_prompt = llm.message_history[2][1].content
+    loop_events = [
+        event
+        for event in trace_logger.events
+        if event["event_type"] == "repeated_tool_call_loop"
+    ]
     assert result.success is True
     assert len(env.calls) == 2
     assert third_prompt.count("variants_total=8; available_count=4;") == 1
+    assert "unavailable_variants=" in third_prompt
+    assert "Repeat guardrails:" in third_prompt
+    assert "Do not call it again with identical args" in third_prompt
     assert "debug_blob" not in third_prompt
-    assert len(third_prompt) < 2500
+    assert len(loop_events) == 1
+    assert loop_events[0]["tool_name"] == "get_product_details"
+    assert loop_events[0]["same_call_run_length"] == 2
+    assert loop_events[0]["consecutive_repeat_count"] == 1
+    assert loop_events[0]["observation_hash"]
+    assert len(third_prompt) < 3500

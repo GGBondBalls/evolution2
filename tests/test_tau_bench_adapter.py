@@ -350,6 +350,31 @@ def test_tau_retail_export_sample_loads_python_tasks_and_data_dir() -> None:
     assert "#W2378156" in order_result.observation
 
 
+def test_tau_retail_product_type_listing_returns_official_id_mapping() -> None:
+    env = TauBenchEnv(
+        {
+            "domain": "retail",
+            "split_file": "data/external/tau2-bench/data/tau2/domains/retail/tasks.json",
+            "task_split_file": "data/external/tau2-bench/data/tau2/domains/retail/split_tasks.json",
+            "task_split": "base",
+            "data_file": "data/external/tau2-bench/data/tau2/domains/retail/db.json",
+            "evaluation": "official_like",
+            "compare_action_args": True,
+            "require_data": True,
+            "validate_export_schema": True,
+        }
+    )
+
+    result = env.call_tool("list_all_product_types", {})
+    product_index = json.loads(result.observation)
+
+    assert result.ok
+    assert product_index["T-Shirt"] == "9523456873"
+    assert product_index["Mechanical Keyboard"] == "1656367028"
+    assert product_index["Smart Thermostat"] == "4896585277"
+    assert "JSON mapping product names to product ids" in env.tool_descriptions()
+
+
 def test_tau2_official_nested_task_format_loads_and_filters(tmp_path: Path) -> None:
     tasks_path = tmp_path / "official_tasks.json"
     split_path = tmp_path / "official_splits.json"
@@ -1336,6 +1361,106 @@ def test_failure_taxonomy_splits_truncated_json_from_other_parse_errors(tmp_path
     assert task["primary_failure_type"] == "truncated_json_response"
     assert task["first_model_parse_error"]["parse_error"] == "truncated_json_response"
     assert task["first_model_parse_error"]["token_budget_hit"] is True
+
+
+def test_failure_taxonomy_splits_max_step_loop_subtypes(tmp_path: Path) -> None:
+    run_records = [
+        {
+            "run_id": "run_repeat",
+            "task_id": "task_repeat",
+            "success": False,
+            "reward": 0.0,
+            "num_steps": 16,
+            "tool_calls": 16,
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "memory_policy": "none",
+            "error_type": "max_steps_exceeded",
+            "evaluation_details": {
+                "expected_actions_matched": False,
+                "expected_action_count": 5,
+                "actual_action_count": 16,
+                "tool_semantic_error_count": 0,
+                "tool_semantic_errors": [],
+            },
+        },
+        {
+            "run_id": "run_unknown",
+            "task_id": "task_unknown",
+            "success": False,
+            "reward": 0.0,
+            "num_steps": 16,
+            "tool_calls": 16,
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "memory_policy": "none",
+            "error_type": "max_steps_exceeded",
+            "evaluation_details": {
+                "expected_actions_matched": False,
+                "expected_action_count": 11,
+                "actual_action_count": 16,
+                "tool_semantic_error_count": 1,
+                "tool_semantic_errors": [
+                    {
+                        "index": 2,
+                        "tool_name": "get_product_details",
+                        "args": {"product_id": "unknown"},
+                        "observation": "Product unknown was not found.",
+                        "classification": "tool_semantic_error",
+                    }
+                ],
+            },
+        },
+    ]
+    trace_records = [
+        {
+            "run_id": "run_repeat",
+            "task_id": "task_repeat",
+            "step": 5,
+            "event_type": "repeated_tool_call_loop",
+            "tool_name": "get_product_details",
+            "tool_args": {"product_id": "1656367028"},
+            "first_step": 4,
+            "current_step": 5,
+            "same_call_run_length": 2,
+            "consecutive_repeat_count": 1,
+            "observation_hash": "abc123",
+            "observation_excerpt": "product_id=1656367028",
+        },
+        {
+            "run_id": "run_unknown",
+            "task_id": "task_unknown",
+            "step": 3,
+            "event_type": "tool_call",
+            "tool_name": "get_product_details",
+            "tool_args": {"product_id": "unknown"},
+            "ok": False,
+        },
+    ]
+    (tmp_path / "runs.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in run_records) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "trace_events.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in trace_records) + "\n",
+        encoding="utf-8",
+    )
+
+    taxonomy = summarize_failure_taxonomy(tmp_path)
+    metrics = failure_taxonomy_metric_summary(taxonomy)
+
+    assert taxonomy["primary_failure_types"] == {
+        "repeated_tool_call_loop": 1,
+        "unknown_product_lookup_loop": 1,
+    }
+    assert metrics["repeated_tool_call_loop_count"] == 1
+    assert metrics["unknown_product_lookup_loop_count"] == 1
+    repeated_task = next(task for task in taxonomy["tasks"] if task["task_id"] == "task_repeat")
+    unknown_task = next(task for task in taxonomy["tasks"] if task["task_id"] == "task_unknown")
+    assert repeated_task["primary_failure_type"] == "repeated_tool_call_loop"
+    assert repeated_task["first_repeated_tool_call_loop"]["tool_name"] == "get_product_details"
+    assert unknown_task["primary_failure_type"] == "unknown_product_lookup_loop"
+    assert unknown_task["first_unknown_product_lookup"]["args"] == {"product_id": "unknown"}
 
 
 def test_tau_retail_phase2_raw_trace_keeps_evaluator_details(tmp_path: Path) -> None:

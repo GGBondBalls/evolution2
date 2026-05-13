@@ -2269,3 +2269,89 @@ grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_re
 grep '"event_type": "model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
 tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs.jsonl
 ```
+
+## 2026-05-13 第二阶段第九轮
+
+目标：落实真实 actor 重复动作控制、product lookup 可发现性修复和更细 failure taxonomy。第八轮已经消除 no-memory scan3 的 parser/context 类失败，但 3 个真实 actor 任务都落入 `max_steps_exceeded`；本轮优先让这类失败可定位为重复工具循环或 unknown product lookup，并修正本地 retail adapter 与官方 tau2 `list_all_product_types` 行为不一致的问题。
+
+已完成编码：
+
+1. 修改 `src/ntmemevo/agents/react_agent.py`，在连续相同 `tool_name + args` 且返回相同 observation 时写出 `repeated_tool_call_loop` trace event，记录 `repeat_key`、`first_step`、`current_step`、`same_call_run_length`、`consecutive_repeat_count`、`observation_hash` 和 observation excerpt。
+2. `ReActToolAgent` prompt 新增动态 `Repeat guardrails` 区块：一旦发现重复调用，下一轮 prompt 明确要求不要再以相同 args 调同一工具，应使用已有 observation、转向不同必要查询、给 final answer，或在数据充分时调用安全写工具。
+3. `ReActToolAgent` 的常驻 retail guardrails 加强：禁止重复相同 read-only 工具调用；exchange 场景要求每个相关 product 只检查一次，然后用选定 replacement item ids 调 exchange tool。
+4. 修改 product observation prompt 压缩：`get_product_details` 现在同时保留 capped `available_variants` 与 `unavailable_variants`，使 task `0/1` 能看到 `clicky + RGB + full size` 的 unavailable 证据，以及 `clicky + none + full size` fallback item。
+5. 修改 `list_all_product_types` prompt 压缩，支持官方式 product-name 到 product-id 映射的紧凑展示，避免 `T-Shirt -> 9523456873` 在 prompt-only 摘要中被截断。
+6. 修改 `src/ntmemevo/envs/tau_bench.py`，将本地 adapter 的 `list_all_product_types()` 从“只返回 type names / unknown”修正为官方 tau2 行为：返回 JSON mapping `{product_name: product_id}`，并更新工具描述为 `JSON mapping product names to product ids`。这直接修复第八轮 task `2` 中模型只能得到 `product_types=unknown` 的 adapter 侧问题。
+7. 修改 `src/ntmemevo/evaluation/failure_taxonomy.py`，将 `repeated_tool_call_loop` 纳入 trace event 计数，并在 `error_type=max_steps_exceeded` 时优先拆分：
+   - 存在 `get_product_details(product_id="unknown")` 等 unknown lookup 时，primary failure 记为 `unknown_product_lookup_loop`。
+   - 存在重复工具调用 trace 时，primary failure 记为 `repeated_tool_call_loop`。
+   - 否则保持 `max_steps_exceeded`。
+8. `failure_taxonomy.json.tasks[*]` 新增 `repeated_tool_call_loop_count`、`first_repeated_tool_call_loop`、`unknown_product_lookup_count`、`first_unknown_product_lookup`；`metrics.json` 新增 `repeated_tool_call_loop_count` 和 `unknown_product_lookup_loop_count`。
+9. 更新测试：覆盖重复调用 trace/prompt guardrail、product variant unavailable 摘要、官方 product type id mapping、`max_steps_exceeded` 下的 `repeated_tool_call_loop` 与 `unknown_product_lookup_loop` taxonomy 拆分。
+
+关键实现说明：
+
+1. 本轮不硬拦截或改写模型动作，只做 prompt guardrail 与审计记录。原因是当前真实 actor 仍需要暴露自然失败形态；强行拦截重复动作会改变 action history，可能让 no-memory baseline 与官方 expected-actions evaluator 的关系变得不透明。
+2. `list_all_product_types` 对齐官方 tau2 是 adapter correctness 修复，不是泄露 hidden expected actions。官方工具文档本身声明该工具返回 product name 到 product id 的 JSON mapping。
+3. `unknown_product_lookup_loop` 是保守分类：只在 `max_steps_exceeded` 且 evaluation details 中出现 `get_product_details` 的 unknown product semantic error 时触发；action-replay 中预期的 missing product negative observation 不会被误分到该类。
+4. `repeated_tool_call_loop` trace 只在连续重复且 observation 完全相同的情况下写出，避免把“同工具不同参数”的正常多项检查误判成循环。
+5. 本轮仍不运行 raw-trace-rag scan3、NT-MemEvo gate、support verification 或 memory 收益实验；准入条件仍是 no-memory scan3 至少能稳定消除 parser/context 类失败，并把剩余失败落入可解释 taxonomy。
+
+本地验证：
+
+1. `conda run -n rm python -m py_compile src/ntmemevo/agents/react_agent.py src/ntmemevo/envs/tau_bench.py src/ntmemevo/evaluation/failure_taxonomy.py tests/test_react_agent.py tests/test_tau_bench_adapter.py` 通过。
+2. `conda run -n rm python -m pytest tests/test_react_agent.py tests/test_tau_bench_adapter.py::test_tau_retail_product_type_listing_returns_official_id_mapping tests/test_tau_bench_adapter.py::test_failure_taxonomy_splits_max_step_loop_subtypes -q` 通过：`9 passed in 0.15s`。
+3. `conda run -n rm python -m pytest -q` 通过：`51 passed in 0.21s`。
+4. `conda run -n rm python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml` 通过。
+5. action-replay scan10 guardrail 结果：`num_tasks=10`、`success_rate=1.0`、`expected_actions_matched_count=10`、`expected_actions_failed_count=0`、`tool_observation_error_count=3`、`expected_negative_observation_count=3`、`tool_semantic_error_count=0`、`communicate_info_passed_count=3`、`nl_assertion_passed_count=3`、`failure_taxonomy_primary_types={"success": 10}`、`model_parse_error_count=0`、`truncated_json_response_count=0`、`repeated_tool_call_loop_count=0`、`unknown_product_lookup_loop_count=0`。
+
+用户复验建议命令：
+
+```bash
+conda activate rm
+pip install -e ".[dev,vllm]"
+python -m pytest
+
+# 不依赖 GPU 的 adapter/evaluator/taxonomy guardrail。
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_action_replay_scan10.yaml
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_action_replay_scan10_seed1/failure_taxonomy.json
+
+# 终端 1：启动本地 Qwen/vLLM 服务。
+CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.85 MAX_MODEL_LEN=4096 \
+  bash scripts/start_vllm_qwen35_9b.sh
+
+# 终端 2：真实 actor no-memory scan3。
+export VLLM_BASE_URL=http://127.0.0.1:8000/v1
+curl http://127.0.0.1:8000/v1/models
+python -m ntmemevo.experiments.run_stream --config configs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3.yaml
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/metrics.json
+cat runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/failure_taxonomy.json
+grep '"event_type": "expected_actions_complete"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "repeated_tool_call_loop"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_parse_error"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+grep '"event_type": "model_action_repair"' runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/trace_events.jsonl || true
+tail -n 3 runs/tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1/runs.jsonl
+```
+
+实验日志填写建议：
+
+1. `tau_retail_phase2_official_tau2_real_actor_nomem_scan3_seed1` 重点记录 `failure_taxonomy_primary_types` 是否从宽泛 `max_steps_exceeded` 转为 `repeated_tool_call_loop`、`unknown_product_lookup_loop`、action mismatch、tool semantic error、communicate/nl mismatch 或 success。
+2. 逐任务记录 `repeated_tool_call_loop_count`、`first_repeated_tool_call_loop.tool_name/tool_args/same_call_run_length`、`unknown_product_lookup_count` 和 `first_unknown_product_lookup`。
+3. task `0/1` 重点看模型是否仍重复 `get_product_details(1656367028)`，是否能转向 `get_product_details(4896585277)`，以及是否最终调用 `exchange_delivered_order_items`。
+4. task `2` 重点看 `list_all_product_types` 是否返回并被模型使用 `T-Shirt -> 9523456873`，是否还会调用 `get_product_details({"product_id":"unknown"})`，以及 communicate/nl 是否包含 `10` 个 t-shirt options。
+5. 若 `model_parse_error_count` 或 `truncated_json_response_count` 回升，先回到输出协议/context 问题，不进入 raw-trace-rag。
+6. 若 no-memory scan3 中 parser/context 计数保持 0，且循环显著减少或 taxonomy 已能稳定解释，再考虑运行 `configs/tau_retail_phase2_official_tau2_real_actor_raw_trace_rag_scan3.yaml` 做小样本日志形态对照。
+
+当前边界：
+
+1. 本轮编码环境没有本地 vLLM/GPU 服务，因此未产生新的真实 actor no-memory scan3 结果；真实 actor 结果仍等待用户在目标环境复验后填写 `docs/experiment_log.md`。
+2. 本轮只修复真实 actor 基线的工具行为控制与可解释性，不报告 memory 方法收益。
+3. 如果第九轮 no-memory scan3 仍全部失败，但 `failure_taxonomy_primary_types` 能从单一 `max_steps_exceeded` 拆成具体循环或 lookup 子类，本轮 taxonomy 目标仍可局部验收；下一轮再针对主要子类继续修 actor prompt/tool strategy。
+
+下一步建议：
+
+1. 用户先完成第九轮 no-memory scan3 复验，并把 metrics、failure taxonomy 与逐任务观察补入 `docs/experiment_log.md`。
+2. 若 task `0/1` 仍重复同一 product lookup，应考虑更强的 agent-side duplicate read blocking 或 explicit checklist prompt。
+3. 若 task `2` 已能发现 `T-Shirt -> 9523456873` 但仍不能完成 return flow，再针对 order scanning 与 return item selection 单独加工具策略提示。
+4. 只有 no-memory scan3 的 parser/context/loop 问题达到可解释准入后，才恢复 raw-trace-rag scan3 与后续 NT-MemEvo 对照。

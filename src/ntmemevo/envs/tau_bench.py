@@ -71,7 +71,7 @@ class TauBenchEnv(AgentEnv):
                 "get_order_details(order_id: str) -> order status, items, payment, and shipping details",
                 "get_product_details(product_id: str) -> product name, type, price, and variants",
                 "get_item_details(item_id: str) -> inventory variant details for a concrete item id",
-                "list_all_product_types() -> available product type names",
+                "list_all_product_types() -> JSON mapping product names to product ids",
                 "lookup_policy(policy_name: str) -> retail policy text",
                 "calculate(expression: str) -> arithmetic result",
                 "think(thought: str) -> private reasoning note",
@@ -910,13 +910,21 @@ class TauBenchEnv(AgentEnv):
         return ToolResult("get_item_details", args, self._compact_record(variant))
 
     def _list_all_product_types(self, args: dict[str, Any]) -> ToolResult:
-        product_types = sorted(
-            {
-                str(product.get("type") or product.get("product_type") or product.get("category") or "unknown")
-                for product in self.db["products"].values()
-            }
+        product_index = {
+            str(
+                product.get("name")
+                or product.get("type")
+                or product.get("product_type")
+                or product.get("category")
+                or product_id
+            ): str(product.get("product_id") or product_id)
+            for product_id, product in self.db["products"].items()
+        }
+        return ToolResult(
+            "list_all_product_types",
+            args,
+            json.dumps(product_index, ensure_ascii=False, sort_keys=True),
         )
-        return ToolResult("list_all_product_types", args, "product_types=" + ", ".join(product_types))
 
     def _lookup_policy(self, args: dict[str, Any]) -> ToolResult:
         policy_name = str(args.get("policy_name") or args.get("name") or args.get("topic") or "")
